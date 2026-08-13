@@ -182,7 +182,7 @@ jobs:
                 -f sha="$TARGET_SHA" \
                 -F force=true >/dev/null
             fi
-            create_options=(--verify-tag)
+            create_options=(--verify-tag --target "$TARGET_SHA")
           fi
 
           if ! gh release create "$RELEASE_TAG" release-assets/* \
