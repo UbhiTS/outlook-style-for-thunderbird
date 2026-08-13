@@ -1,13 +1,13 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.19**.
+Current package version: **1.0.20**.
 
 An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.0.3 and later**. It follows the operating system's light or dark appearance automatically and uses Outlook-inspired Fluent colors in both modes.
 
 The package uses two add-ons:
 
 - **Outlook Style for Thunderbird** controls the app's colors, typography, spacing, mail list, reading pane, Today pane, and reminder-window appearance.
-- **Outlook Style Companion** keeps displayed messages aligned with the active system appearance and adds the behaviors that a static theme cannot provide: parent-thread summaries, functional My Day controls, per-meeting snooze-until-start, and calendar-detail enhancements.
+- **Outlook Style Companion** keeps displayed messages aligned with the active system appearance and adds the behaviors that a static theme cannot provide: parent-thread summaries, functional My Day controls, inline event guests, per-meeting snooze-until-start, and calendar-detail enhancements.
 
 Together they provide:
 
@@ -19,6 +19,7 @@ Together they provide:
 - Segoe UI when available, with system-font fallbacks
 - An Outlook-style Spaces application rail
 - An Outlook My Day-inspired Calendar and To Do pane
+- An Outlook-style Guests field and a polished, one-click Scheduling Assistant for events
 - A readable adaptive reminder window with an exact **Until meeting starts — time** snooze action
 - A readable adaptive event-details window, opened by either **Details…** or a reminder-row double-click
 
@@ -30,8 +31,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.19.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.19.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.20.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.20.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -83,6 +84,7 @@ The script creates matching `.xpi` and `.zip` files in `dist/`, with `manifest.j
 - Detailed styling and companion behavior use internal Thunderbird interfaces. A future Thunderbird redesign may require an update.
 - Modern Thunderbird supports lightweight themes, not legacy complete themes. This project can closely reproduce Outlook's colors, density, surfaces, selection, hierarchy, and selected workflows, but it cannot replace Thunderbird with Outlook's Ribbon.
 - The theme follows the operating system's light/dark preference for both application chrome and content. Message authors can still specify deliberate colors in their own HTML.
+- Participant availability still depends on the selected calendar provider. Thunderbird's Google connection uses CalDAV, and Google's CalDAV service does not provide participant free/busy lookup; an empty Scheduling Assistant row can therefore mean either free or unavailable data. A true Google availability pane would require separate Google Calendar API authorization and network access, which this local companion intentionally does not request.
 
 ## Default calendar for invitations
 
@@ -93,6 +95,33 @@ eligible calendars for an invitation response. It never bypasses read-only,
 disabled, identity, or scheduling checks. If the default is not eligible, the
 normal **Select Calendar** dialog remains available and is centered over the
 window that opened it instead of appearing in a screen corner.
+
+## Event guests and Scheduling Assistant
+
+New and editable events now include a **Guests** field directly below the title.
+Enter an address (or an address-book list) and press Enter; Thunderbird's own
+attendee and organizer objects are updated, so its normal **Send**, invitation,
+notification, recurrence, and calendar-provider workflows remain authoritative.
+Guests appear as removable chips, and read-only events keep these controls
+disabled.
+
+Use **Scheduling assistant** for optional attendees, rooms,
+resources, roles, and provider-supplied free/busy details. The native dialog is
+now larger, centered, adaptive in light and dark modes, and includes a warning
+that a blank row is ambiguous rather than proof that someone is available.
+
+## Version 1.0.20 event guests and scheduling
+
+- Adds a discoverable Outlook-style Guests field to the main event editor with
+  native address-book autocomplete, mailing-list expansion, removable chips,
+  and read-only protection.
+- Restyles, enlarges, and centers Thunderbird's native Invite Attendees window,
+  preserving its optional attendee, resource, room, role, time, and invitation
+  behavior.
+- Makes the free/busy grid coherent in light, dark, RTL, and forced-colors
+  modes, and explains when a provider may not have returned availability data.
+- Keeps all event saving and invitation delivery on Thunderbird's native path;
+  the Companion adds no calendar-network or OAuth permissions.
 
 ## Version 1.0.19 message states and invitation calendar
 

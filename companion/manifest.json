@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Outlook Style Companion",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "author": "Local custom build",
-  "description": "Keeps messages aligned with the system color scheme, shows parent-thread summaries, and enhances Outlook-style calendar and reminder workflows.",
+  "description": "Keeps messages aligned with the system color scheme and enhances Outlook-style mail, attendee, calendar, and reminder workflows.",
   "browser_specific_settings": {
     "gecko": {
       "id": "fluent-mail-light-message-view@local",

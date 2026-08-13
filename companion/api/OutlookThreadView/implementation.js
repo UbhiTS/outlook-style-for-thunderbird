@@ -4,6 +4,15 @@ const { ExtensionSupport } = ChromeUtils.importESModule(
 const { cal } = ChromeUtils.importESModule(
   "resource:///modules/calendar/calUtils.sys.mjs"
 );
+const { CalAttendee } = ChromeUtils.importESModule(
+  "resource:///modules/CalAttendee.sys.mjs"
+);
+const { MailServices } = ChromeUtils.importESModule(
+  "resource:///modules/MailServices.sys.mjs"
+);
+const { MailUtils } = ChromeUtils.importESModule(
+  "resource:///modules/MailUtils.sys.mjs"
+);
 
 const TODAY_PANE_LISTENER_ID = "fluent-mail-outlook-inspired-today-pane";
 const MAIN_PANE_SCHEME_LISTENER_ID =
@@ -19,6 +28,8 @@ const COMPOSE_WINDOW_URL =
   "chrome://messenger/content/messengercompose/messengercompose.xhtml";
 const EVENT_DIALOG_WINDOW_URL =
   "chrome://calendar/content/calendar-event-dialog.xhtml";
+const EVENT_ATTENDEES_DIALOG_WINDOW_URL =
+  "chrome://calendar/content/calendar-event-dialog-attendees.xhtml";
 const EVENT_SUMMARY_DIALOG_WINDOW_URL =
   "chrome://calendar/content/calendar-summary-dialog.xhtml";
 const CALENDAR_CHOOSER_LISTENER_ID =
@@ -35,6 +46,8 @@ const EVENT_WINDOW_HEIGHT_PREF =
   "extensions.fluent-mail-outlook-inspired.event-window-height";
 const DEFAULT_EVENT_WINDOW_WIDTH = 900;
 const DEFAULT_EVENT_WINDOW_HEIGHT = 840;
+const DEFAULT_ATTENDEES_WINDOW_WIDTH = 1100;
+const DEFAULT_ATTENDEES_WINDOW_HEIGHT = 720;
 const enhancedTodayPaneWindows = new Set();
 const todayPaneState = new WeakMap();
 let todayPaneListenerRegistered = false;
@@ -59,6 +72,12 @@ function getOutlookColorScheme(window) {
   );
   if (nativeScheme === "light" || nativeScheme === "dark") {
     return nativeScheme;
+  }
+  const stampedScheme = window.document?.documentElement?.getAttribute(
+    OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+  );
+  if (stampedScheme === "light" || stampedScheme === "dark") {
+    return stampedScheme;
   }
   return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches
     ? "dark"
@@ -102,7 +121,9 @@ function stampOutlookColorScheme(document, scheme) {
   if (!root || (scheme !== "light" && scheme !== "dark")) {
     return;
   }
-  root.setAttribute(OUTLOOK_COLOR_SCHEME_ATTRIBUTE, scheme);
+  if (root.getAttribute(OUTLOOK_COLOR_SCHEME_ATTRIBUTE) !== scheme) {
+    root.setAttribute(OUTLOOK_COLOR_SCHEME_ATTRIBUTE, scheme);
+  }
 }
 
 function installMainPaneSchemeBridge(window) {
@@ -1885,10 +1906,752 @@ function installRememberedEventWindowGeometry(
   return { schedule: scheduleWindowGeometry };
 }
 
+function normalizeAttendeeId(id) {
+  return cal.email.removeMailTo(id || "").trim().toLowerCase();
+}
+
+function getCurrentEventCalendar(frameWindow) {
+  try {
+    return (
+      frameWindow.getCurrentCalendar?.() ||
+      frameWindow.calendarItem?.calendar ||
+      null
+    );
+  } catch (error) {
+    return frameWindow.calendarItem?.calendar || null;
+  }
+}
+
+function resolveInlineAttendeeMailboxes(value) {
+  const addresses = MailServices.headerParser.makeFromDisplayAddress(value);
+  const mailboxes = new Map();
+  const visitedLists = new Set();
+
+  const resolveAddress = address => {
+    let list = null;
+    if (address.name) {
+      try {
+        list = MailUtils.findListInAddressBooks(address.name);
+      } catch (error) {
+        /* A plain display name does not necessarily name an address-book list. */
+      }
+    }
+    if (list) {
+      const listKey = list.UID || list.URI || address.name.toLowerCase();
+      if (visitedLists.has(listKey)) {
+        return;
+      }
+      visitedLists.add(listKey);
+      for (const childCard of Array.from(list.childCards || [])) {
+        const card = childCard.QueryInterface(Ci.nsIAbCard);
+        resolveAddress(
+          MailServices.headerParser.makeMailboxObject(
+            card.displayName,
+            card.primaryEmail
+          )
+        );
+      }
+      return;
+    }
+
+    const email = address.email?.trim();
+    if (!email) {
+      return;
+    }
+    mailboxes.set(email.toLowerCase(), {
+      email,
+      name: address.name?.trim() || "",
+    });
+  };
+
+  for (const address of addresses) {
+    resolveAddress(address);
+  }
+  return [...mailboxes.values()];
+}
+
+function getCalendarOrganizerId(calendar) {
+  try {
+    return calendar?.getProperty("organizerId") || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function getCalendarOrganizerName(calendar) {
+  try {
+    return calendar?.getProperty("organizerCN") || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function addDefaultOrganizerAttendee(frameWindow, calendar, attendees) {
+  if (attendees.length) {
+    return;
+  }
+  if (frameWindow.organizer?.id) {
+    attendees.push(frameWindow.organizer.clone());
+    return;
+  }
+  const organizerId = getCalendarOrganizerId(calendar);
+  if (!organizerId) {
+    return;
+  }
+  const organizerAsAttendee = new CalAttendee();
+  organizerAsAttendee.id = cal.email.removeMailTo(organizerId);
+  organizerAsAttendee.commonName = getCalendarOrganizerName(calendar);
+  organizerAsAttendee.role = "REQ-PARTICIPANT";
+  organizerAsAttendee.participationStatus = "ACCEPTED";
+  attendees.push(organizerAsAttendee);
+}
+
+function reconcileInlineOrganizer(frameWindow, calendar, attendees) {
+  const existingOrganizer = frameWindow.organizer;
+  const organizerId = existingOrganizer?.id || getCalendarOrganizerId(calendar);
+  let organizer;
+
+  if (organizerId) {
+    const organizerKey = normalizeAttendeeId(organizerId);
+    const nonOrganizerAttendees = attendees.filter(
+      attendee => normalizeAttendeeId(attendee.id) !== organizerKey
+    );
+    if (nonOrganizerAttendees.length) {
+      if (existingOrganizer) {
+        organizer = existingOrganizer;
+      } else {
+        organizer = new CalAttendee();
+        organizer.id = cal.email.removeMailTo(organizerId);
+        organizer.commonName = getCalendarOrganizerName(calendar);
+        organizer.isOrganizer = true;
+      }
+    } else {
+      attendees.length = 0;
+    }
+  }
+
+  return { attendees, organizer };
+}
+
+function applyInlineAttendeeState(frameWindow, attendees) {
+  const calendar = getCurrentEventCalendar(frameWindow);
+  const nextState = reconcileInlineOrganizer(
+    frameWindow,
+    calendar,
+    attendees
+  );
+  frameWindow.attendees = nextState.attendees;
+  frameWindow.organizer = nextState.organizer;
+  frameWindow.updateAttendeeInterface();
+}
+
+function formatInlineAttendee(attendee) {
+  const email = cal.email.removeMailTo(attendee.id || "");
+  return {
+    email,
+    label: attendee.commonName || email,
+  };
+}
+
+/**
+ * Add a small Outlook-style Guests editor to Thunderbird's event iframe while
+ * keeping Thunderbird's cloned attendee/organizer state and native Save/Send
+ * path authoritative.
+ *
+ * @param {Element} itemFrame - The native calendar item iframe.
+ * @returns {Function} Cleanup function.
+ */
+function enhanceInlineGuestsEditor(itemFrame) {
+  const hostWindow = itemFrame.ownerDocument.defaultView;
+  let disposed = false;
+  let retryTimer = 0;
+  let attendeeObserver = null;
+  let commandObserver = null;
+  let frameWindow = null;
+  let frameDocument = null;
+  let row = null;
+  let attendeeContainer = null;
+  let chips = null;
+  let input = null;
+  let autocompletePopup = null;
+  let openSchedulingButton = null;
+  let feedback = null;
+  let calendarPicker = null;
+
+  const setFeedback = message => {
+    if (feedback) {
+      feedback.textContent = message;
+    }
+  };
+  const attendeeEditingDisabled = () => {
+    const command = frameDocument?.getElementById("cmd_attendees");
+    return Boolean(
+      frameWindow?.gIsReadOnly ||
+        attendeeContainer?.disabled ||
+        attendeeContainer?.hasAttribute("disabled") ||
+        command?.disabled ||
+        command?.hasAttribute("disabled")
+    );
+  };
+
+  const renderChips = () => {
+    if (!chips || !frameWindow || disposed) {
+      return;
+    }
+    chips.replaceChildren();
+    const attendees = Array.isArray(frameWindow.attendees)
+      ? frameWindow.attendees
+      : [];
+    const organizerKey = normalizeAttendeeId(
+      frameWindow.organizer?.id ||
+        getCalendarOrganizerId(getCurrentEventCalendar(frameWindow))
+    );
+    const editingDisabled = attendeeEditingDisabled();
+    if (input) {
+      input.disabled = editingDisabled;
+    }
+    if (openSchedulingButton) {
+      openSchedulingButton.disabled = editingDisabled;
+    }
+    attendees.forEach((attendee, index) => {
+      if (
+        !attendee?.id ||
+        (organizerKey && normalizeAttendeeId(attendee.id) === organizerKey)
+      ) {
+        return;
+      }
+      const display = formatInlineAttendee(attendee);
+      const chip = frameDocument.createElement("span");
+      chip.className = "outlook-style-guest-chip";
+      chip.setAttribute("role", "listitem");
+      chip.title = display.email;
+
+      const label = frameDocument.createElement("span");
+      label.className = "outlook-style-guest-chip-label";
+      label.textContent = display.label;
+      chip.appendChild(label);
+
+      const remove = frameDocument.createElement("button");
+      remove.type = "button";
+      remove.className = "outlook-style-guest-chip-remove";
+      remove.textContent = "×";
+      remove.setAttribute("aria-label", `Remove ${display.label}`);
+      remove.disabled = editingDisabled;
+      remove.addEventListener("click", () => {
+        if (attendeeEditingDisabled()) {
+          return;
+        }
+        const nextAttendees = [...frameWindow.attendees];
+        nextAttendees.splice(index, 1);
+        applyInlineAttendeeState(frameWindow, nextAttendees);
+        renderChips();
+        setFeedback(`${display.label} removed.`);
+        input?.focus();
+      });
+      chip.appendChild(remove);
+      chips.appendChild(chip);
+    });
+  };
+
+  const commitInput = () => {
+    const value = input?.value.trim();
+    if (!value || !frameWindow || disposed || attendeeEditingDisabled()) {
+      return;
+    }
+
+    let mailboxes;
+    try {
+      mailboxes = resolveInlineAttendeeMailboxes(value);
+    } catch (error) {
+      setFeedback("Enter a valid attendee name or email address.");
+      return;
+    }
+    if (!mailboxes.length) {
+      setFeedback("Enter a valid attendee name or email address.");
+      return;
+    }
+
+    const calendar = getCurrentEventCalendar(frameWindow);
+    const nextAttendees = Array.isArray(frameWindow.attendees)
+      ? [...frameWindow.attendees]
+      : [];
+    addDefaultOrganizerAttendee(frameWindow, calendar, nextAttendees);
+    const existingIds = new Set(
+      nextAttendees.map(attendee => normalizeAttendeeId(attendee.id))
+    );
+    let added = 0;
+    for (const mailbox of mailboxes) {
+      const attendeeId = cal.email.prependMailTo(mailbox.email);
+      const attendeeKey = normalizeAttendeeId(attendeeId);
+      if (!attendeeKey || existingIds.has(attendeeKey)) {
+        continue;
+      }
+      const attendee = new CalAttendee();
+      attendee.id = attendeeId;
+      attendee.role = "REQ-PARTICIPANT";
+      attendee.userType = "INDIVIDUAL";
+      if (mailbox.name && mailbox.name !== mailbox.email) {
+        attendee.commonName = mailbox.name;
+      }
+      nextAttendees.push(attendee);
+      existingIds.add(attendeeKey);
+      added++;
+    }
+
+    input.value = "";
+    applyInlineAttendeeState(frameWindow, nextAttendees);
+    renderChips();
+    setFeedback(
+      added
+        ? `${added} attendee${added === 1 ? "" : "s"} added.`
+        : "That attendee is already added."
+    );
+  };
+
+  const onInputChange = () => commitInput();
+  const onInputKeyDown = event => {
+    if (event.isComposing || attendeeEditingDisabled()) {
+      return;
+    }
+    if (event.key === "Enter") {
+      if (input.popupOpen) {
+        frameWindow.setTimeout(commitInput, 0);
+      } else {
+        event.preventDefault();
+        commitInput();
+      }
+    } else if (event.key === ";") {
+      event.preventDefault();
+      commitInput();
+    } else if (
+      event.key === "Backspace" &&
+      !input.value &&
+      frameWindow.attendees?.length
+    ) {
+      const nextAttendees = [...frameWindow.attendees];
+      const organizerKey = normalizeAttendeeId(
+        frameWindow.organizer?.id ||
+          getCalendarOrganizerId(getCurrentEventCalendar(frameWindow))
+      );
+      const removeIndex = nextAttendees.findLastIndex(
+        attendee =>
+          attendee?.id &&
+          (!organizerKey || normalizeAttendeeId(attendee.id) !== organizerKey)
+      );
+      if (removeIndex < 0) {
+        return;
+      }
+      event.preventDefault();
+      const [removedAttendee] = nextAttendees.splice(removeIndex, 1);
+      const removed = formatInlineAttendee(removedAttendee);
+      applyInlineAttendeeState(frameWindow, nextAttendees);
+      renderChips();
+      setFeedback(`${removed.label} removed.`);
+    } else if (event.key === "Escape" && input.value) {
+      event.preventDefault();
+      input.value = "";
+      setFeedback("Attendee entry cleared.");
+    }
+  };
+  const onOpenScheduling = () => {
+    if (attendeeEditingDisabled()) {
+      return;
+    }
+    try {
+      frameWindow.editAttendees();
+    } finally {
+      renderChips();
+    }
+  };
+  const onCalendarChange = () => renderChips();
+
+  const install = () => {
+    retryTimer = 0;
+    if (disposed) {
+      return;
+    }
+    frameWindow = itemFrame.contentWindow;
+    frameDocument = itemFrame.contentDocument;
+    if (
+      frameDocument?.documentURI !==
+        "chrome://calendar/content/calendar-item-iframe.xhtml" ||
+      !frameWindow?.calendarItem ||
+      !Array.isArray(frameWindow.attendees) ||
+      typeof frameWindow.updateAttendeeInterface !== "function" ||
+      typeof frameWindow.editAttendees !== "function"
+    ) {
+      retryTimer = hostWindow.setTimeout(install, 100);
+      return;
+    }
+    if (!frameWindow.calendarItem.isEvent()) {
+      return;
+    }
+
+    const titleRow = frameDocument.getElementById("event-grid-title-row");
+    if (!titleRow) {
+      retryTimer = hostWindow.setTimeout(install, 100);
+      return;
+    }
+    frameDocument
+      .getElementById("outlook-style-guests-row")
+      ?.remove();
+    frameDocument
+      .getElementById("outlook-style-guests-autocomplete-popup")
+      ?.remove();
+    frameDocument.documentElement.setAttribute(
+      "data-outlook-inline-guests",
+      "true"
+    );
+
+    row = frameDocument.createElementNS(HTML_NS, "tr");
+    row.id = "outlook-style-guests-row";
+
+    const heading = frameDocument.createElementNS(HTML_NS, "th");
+    const guestsLabel = frameDocument.createElementNS(HTML_NS, "label");
+    guestsLabel.id = "outlook-style-guests-label";
+    guestsLabel.htmlFor = "outlook-style-guests-input";
+    guestsLabel.textContent = "Guests:";
+    heading.appendChild(guestsLabel);
+    row.appendChild(heading);
+
+    const cell = frameDocument.createElementNS(HTML_NS, "td");
+    cell.className = "event-input-td";
+    const stack = frameDocument.createElementNS(HTML_NS, "div");
+    stack.className = "outlook-style-guests-stack";
+    const field = frameDocument.createElementNS(HTML_NS, "div");
+    field.className = "outlook-style-guests-field";
+    field.setAttribute("role", "group");
+    field.setAttribute("aria-labelledby", guestsLabel.id);
+
+    chips = frameDocument.createElementNS(HTML_NS, "div");
+    chips.className = "outlook-style-guest-chips";
+    chips.setAttribute("role", "list");
+    field.appendChild(chips);
+
+    input = frameDocument.createElement("input", {
+      is: "autocomplete-input",
+    });
+    input.id = "outlook-style-guests-input";
+    input.className = "outlook-style-guests-input";
+    input.placeholder = "Add required attendees";
+    input.setAttribute("aria-labelledby", guestsLabel.id);
+    input.setAttribute("aria-describedby", "outlook-style-guests-help");
+    input.setAttribute("autocompletesearch", "addrbook ldap");
+    input.setAttribute("autocompletesearchparam", "{}");
+    input.setAttribute("forcecomplete", "true");
+    input.setAttribute("timeout", "200");
+    input.setAttribute("completedefaultindex", "true");
+    input.setAttribute("completeselectedindex", "true");
+    input.setAttribute("minresultsforpopup", "1");
+    const popupSet = frameDocument.getElementById("event-dialog-popupset");
+    if (popupSet) {
+      autocompletePopup = frameDocument.createXULElement("panel", {
+        is: "autocomplete-richlistbox-popup",
+      });
+      autocompletePopup.id = "outlook-style-guests-autocomplete-popup";
+      autocompletePopup.setAttribute("type", "autocomplete-richlistbox");
+      autocompletePopup.setAttribute("role", "group");
+      autocompletePopup.setAttribute("noautofocus", "noautofocus");
+      popupSet.appendChild(autocompletePopup);
+      input.setAttribute("autocompletepopup", autocompletePopup.id);
+    }
+    input.addEventListener("change", onInputChange);
+    input.addEventListener("keydown", onInputKeyDown);
+    field.appendChild(input);
+
+    openSchedulingButton = frameDocument.createElementNS(
+      HTML_NS,
+      "button"
+    );
+    openSchedulingButton.id = "outlook-style-open-scheduling";
+    openSchedulingButton.type = "button";
+    openSchedulingButton.textContent = "Scheduling assistant";
+    openSchedulingButton.title =
+      "Add optional attendees, rooms, resources, and check provider availability";
+    openSchedulingButton.addEventListener("click", onOpenScheduling);
+    field.appendChild(openSchedulingButton);
+    stack.appendChild(field);
+
+    const help = frameDocument.createElementNS(HTML_NS, "div");
+    help.id = "outlook-style-guests-help";
+    help.className = "outlook-style-guests-help";
+    help.textContent =
+      "Optional attendees, rooms, resources, roles, and availability.";
+    stack.appendChild(help);
+
+    feedback = frameDocument.createElementNS(HTML_NS, "div");
+    feedback.id = "outlook-style-guests-feedback";
+    feedback.className = "outlook-style-guests-feedback";
+    feedback.setAttribute("role", "status");
+    feedback.setAttribute("aria-live", "polite");
+    stack.appendChild(feedback);
+    cell.appendChild(stack);
+    row.appendChild(cell);
+    titleRow.after(row);
+
+    attendeeContainer = frameDocument.querySelector(
+      ".item-attendees-list-container"
+    );
+    if (attendeeContainer) {
+      attendeeObserver = new frameWindow.MutationObserver(renderChips);
+      attendeeObserver.observe(attendeeContainer, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["disabled"],
+      });
+    }
+    calendarPicker = frameDocument.getElementById("item-calendar");
+    calendarPicker?.addEventListener("command", onCalendarChange);
+    const attendeesCommand = frameDocument.getElementById("cmd_attendees");
+    if (attendeesCommand) {
+      commandObserver = new frameWindow.MutationObserver(renderChips);
+      commandObserver.observe(attendeesCommand, {
+        attributes: true,
+        attributeFilter: ["disabled"],
+      });
+    }
+    renderChips();
+  };
+
+  install();
+  return () => {
+    disposed = true;
+    if (retryTimer) {
+      hostWindow.clearTimeout(retryTimer);
+      retryTimer = 0;
+    }
+    attendeeObserver?.disconnect();
+    attendeeObserver = null;
+    commandObserver?.disconnect();
+    commandObserver = null;
+    input?.removeEventListener("change", onInputChange);
+    input?.removeEventListener("keydown", onInputKeyDown);
+    try {
+      autocompletePopup?.hidePopup?.();
+    } catch (error) {
+      /* A closing event window may already have disconnected the popup. */
+    }
+    try {
+      input?.detachController?.();
+    } catch (error) {
+      /* The autocomplete controller may already be detached. */
+    }
+    try {
+      if (autocompletePopup?._appendResultTimeout != null) {
+        frameWindow?.clearTimeout(autocompletePopup._appendResultTimeout);
+        autocompletePopup._appendResultTimeout = null;
+      }
+      if (autocompletePopup?._adjustHeightRAFToken != null) {
+        frameWindow?.cancelAnimationFrame(
+          autocompletePopup._adjustHeightRAFToken
+        );
+        autocompletePopup._adjustHeightRAFToken = null;
+      }
+    } catch (error) {
+      /* Private autocomplete work can disappear during window teardown. */
+    }
+    try {
+      if (autocompletePopup) {
+        autocompletePopup.mInput = null;
+      }
+    } catch (error) {
+      /* A disconnected popup no longer needs its input reference cleared. */
+    }
+    autocompletePopup?.remove();
+    openSchedulingButton?.removeEventListener("click", onOpenScheduling);
+    calendarPicker?.removeEventListener("command", onCalendarChange);
+    row?.remove();
+    frameDocument?.documentElement?.removeAttribute(
+      "data-outlook-inline-guests"
+    );
+    row = null;
+    attendeeContainer = null;
+    chips = null;
+    input = null;
+    autocompletePopup = null;
+    openSchedulingButton = null;
+    feedback = null;
+    calendarPicker = null;
+    frameWindow = null;
+    frameDocument = null;
+  };
+}
+
+function getAttendeeDialogThemeSource(window) {
+  try {
+    if (window.opener?.top && !window.opener.top.closed) {
+      return window.opener.top;
+    }
+    if (window.opener && !window.opener.closed) {
+      return window.opener;
+    }
+  } catch (error) {
+    /* Fall back to the attendee window if its opener is being destroyed. */
+  }
+  return window;
+}
+
+function installAttendeeDialogThemeBridge(window, cleanups) {
+  const sourceWindow = getAttendeeDialogThemeSource(window);
+  const sourceRoot = sourceWindow.document?.documentElement;
+  const getSourceScheme = () => {
+    const nativeScheme = sourceRoot?.getAttribute("lwt-sidebar");
+    if (nativeScheme === "light" || nativeScheme === "dark") {
+      return nativeScheme;
+    }
+    if (sourceWindow !== window) {
+      const stampedScheme = sourceRoot?.getAttribute(
+        OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+      );
+      if (stampedScheme === "light" || stampedScheme === "dark") {
+        return stampedScheme;
+      }
+    }
+    return sourceWindow.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  };
+  const syncScheme = () => {
+    if (!window.closed) {
+      stampOutlookColorScheme(window.document, getSourceScheme());
+    }
+  };
+  const sourceObserver = sourceRoot
+    ? new sourceWindow.MutationObserver(syncScheme)
+    : null;
+  sourceObserver?.observe(sourceRoot, {
+    attributes: true,
+    attributeFilter: [
+      OUTLOOK_COLOR_SCHEME_ATTRIBUTE,
+      "lwt-sidebar",
+      "class",
+      "style",
+    ],
+  });
+  const sourceSystemScheme = sourceWindow.matchMedia(
+    "(prefers-color-scheme: dark)"
+  );
+  sourceWindow.addEventListener("windowlwthemeupdate", syncScheme);
+  sourceSystemScheme.addEventListener("change", syncScheme);
+  syncScheme();
+
+  cleanups.push(() => {
+    sourceObserver?.disconnect();
+    sourceWindow.removeEventListener("windowlwthemeupdate", syncScheme);
+    sourceSystemScheme.removeEventListener("change", syncScheme);
+    window.document.documentElement?.removeAttribute(
+      OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+    );
+  });
+}
+
+function installAttendeeDialogGeometry(window, cleanups) {
+  let geometryTimer = window.setTimeout(() => {
+    geometryTimer = 0;
+    if (
+      window.closed ||
+      (typeof window.STATE_NORMAL === "number" &&
+        window.windowState !== window.STATE_NORMAL)
+    ) {
+      return;
+    }
+    const screen = window.screen;
+    const availableLeft = Number(screen?.availLeft) || 0;
+    const availableTop = Number(screen?.availTop) || 0;
+    const availableWidth = Math.max(640, Number(screen?.availWidth) || 1100);
+    const availableHeight = Math.max(560, Number(screen?.availHeight) || 720);
+    const targetWidth = Math.min(
+      availableWidth - 48,
+      Math.max(Number(window.outerWidth) || 0, DEFAULT_ATTENDEES_WINDOW_WIDTH)
+    );
+    const targetHeight = Math.min(
+      availableHeight - 48,
+      Math.max(
+        Number(window.outerHeight) || 0,
+        DEFAULT_ATTENDEES_WINDOW_HEIGHT
+      )
+    );
+
+    let centerX = availableLeft + availableWidth / 2;
+    let centerY = availableTop + availableHeight / 2;
+    try {
+      const opener = getAttendeeDialogThemeSource(window);
+      if (opener !== window && !opener.closed) {
+        centerX = opener.screenX + opener.outerWidth / 2;
+        centerY = opener.screenY + opener.outerHeight / 2;
+      }
+    } catch (error) {
+      /* The active screen center remains a safe fallback. */
+    }
+    const targetLeft = Math.min(
+      Math.max(Math.round(centerX - targetWidth / 2), availableLeft),
+      availableLeft + availableWidth - targetWidth
+    );
+    const targetTop = Math.min(
+      Math.max(Math.round(centerY - targetHeight / 2), availableTop),
+      availableTop + availableHeight - targetHeight
+    );
+
+    try {
+      if (
+        Math.round(window.outerWidth) !== Math.round(targetWidth) ||
+        Math.round(window.outerHeight) !== Math.round(targetHeight)
+      ) {
+        window.resizeTo(targetWidth, targetHeight);
+      }
+      window.moveTo(targetLeft, targetTop);
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not size the attendee window:",
+        error
+      );
+    }
+  }, 100);
+
+  cleanups.push(() => {
+    if (geometryTimer) {
+      window.clearTimeout(geometryTimer);
+      geometryTimer = 0;
+    }
+  });
+}
+
+function enhanceAttendeeDialogSurface(window, cleanups) {
+  const document = window.document;
+  document.documentElement.setAttribute(
+    "data-outlook-attendee-dialog",
+    "true"
+  );
+  installAttendeeDialogThemeBridge(window, cleanups);
+  installAttendeeDialogGeometry(window, cleanups);
+
+  document.getElementById("outlook-style-availability-notice")?.remove();
+  const notice = document.createElementNS(HTML_NS, "div");
+  notice.id = "outlook-style-availability-notice";
+  notice.setAttribute("role", "note");
+  notice.textContent =
+    "Availability comes from your calendar provider. A blank attendee row can mean the person is free, or that no availability data was returned. Google calendars connected through CalDAV do not provide participant free/busy lookup.";
+  const outer = document.getElementById("outer");
+  if (outer?.parentNode) {
+    outer.parentNode.insertBefore(notice, outer);
+  } else {
+    (document.querySelector("dialog") || document.body).prepend(notice);
+  }
+
+  cleanups.push(() => {
+    notice.remove();
+    document.documentElement.removeAttribute(
+      "data-outlook-attendee-dialog"
+    );
+  });
+}
+
 function enhanceEventEditorSurface(window, cleanups) {
   const document = window.document;
   let itemFrame = null;
   let removeEditorTracking = null;
+  let removeInlineGuests = null;
   const geometry = installRememberedEventWindowGeometry(window, cleanups);
 
   const scheduleWindowGeometry = () => {
@@ -1908,6 +2671,12 @@ function enhanceEventEditorSurface(window, cleanups) {
       removeEditorTracking = trackEditorSurface(editor, false);
     }
   };
+  const bindInlineGuests = () => {
+    removeInlineGuests?.();
+    removeInlineGuests = itemFrame
+      ? enhanceInlineGuestsEditor(itemFrame)
+      : null;
+  };
   const onItemFrameLoad = event => {
     if (
       event.target === itemFrame ||
@@ -1915,6 +2684,7 @@ function enhanceEventEditorSurface(window, cleanups) {
       event.originalTarget === itemFrame?.contentDocument
     ) {
       bindDescriptionEditor();
+      bindInlineGuests();
       scheduleWindowGeometry();
     }
   };
@@ -1925,11 +2695,14 @@ function enhanceEventEditorSurface(window, cleanups) {
     }
     removeEditorTracking?.();
     removeEditorTracking = null;
+    removeInlineGuests?.();
+    removeInlineGuests = null;
     itemFrame?.removeEventListener("load", onItemFrameLoad, true);
     itemFrame = nextFrame;
     if (itemFrame) {
       itemFrame.addEventListener("load", onItemFrameLoad, true);
       bindDescriptionEditor();
+      bindInlineGuests();
       if (
         itemFrame.contentDocument?.documentURI ===
           "chrome://calendar/content/calendar-item-iframe.xhtml" &&
@@ -1946,9 +2719,29 @@ function enhanceEventEditorSurface(window, cleanups) {
 
   cleanups.push(() => {
     observer.disconnect();
-    removeEditorTracking?.();
+    try {
+      removeInlineGuests?.();
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not clean the inline Guests editor:",
+        error
+      );
+    }
+    removeInlineGuests = null;
+    try {
+      removeEditorTracking?.();
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not clean the event description editor:",
+        error
+      );
+    }
     removeEditorTracking = null;
-    itemFrame?.removeEventListener("load", onItemFrameLoad, true);
+    try {
+      itemFrame?.removeEventListener("load", onItemFrameLoad, true);
+    } catch (error) {
+      /* The dynamically created item frame may already be disconnected. */
+    }
     itemFrame = null;
   });
 }
@@ -2023,6 +2816,7 @@ function enhanceEditorSurfaceWindow(window) {
     editorSurfaceState.has(window) ||
     (url !== COMPOSE_WINDOW_URL &&
       url !== EVENT_DIALOG_WINDOW_URL &&
+      url !== EVENT_ATTENDEES_DIALOG_WINDOW_URL &&
       url !== EVENT_SUMMARY_DIALOG_WINDOW_URL)
   ) {
     return editorSurfaceState.has(window);
@@ -2033,6 +2827,8 @@ function enhanceEditorSurfaceWindow(window) {
     enhanceComposeEditorSurface(window, cleanups);
   } else if (url === EVENT_DIALOG_WINDOW_URL) {
     enhanceEventEditorSurface(window, cleanups);
+  } else if (url === EVENT_ATTENDEES_DIALOG_WINDOW_URL) {
+    enhanceAttendeeDialogSurface(window, cleanups);
   } else {
     enhanceEventSummarySurface(window, cleanups);
   }
@@ -2048,7 +2844,16 @@ function removeEditorSurfaceWindow(window) {
     return;
   }
   for (const cleanup of state.cleanups.reverse()) {
-    cleanup();
+    try {
+      cleanup();
+    } catch (error) {
+      /* One disconnected nested editor must not prevent the remaining owned
+       * UI from being removed during disable, update, or window teardown. */
+      console.error(
+        "Outlook Style Companion could not completely clean an editor surface:",
+        error
+      );
+    }
   }
   state.cleanups.length = 0;
   editorSurfaceState.delete(window);
@@ -2064,6 +2869,7 @@ function installEditorSurfaceEnhancement() {
     chromeURLs: [
       COMPOSE_WINDOW_URL,
       EVENT_DIALOG_WINDOW_URL,
+      EVENT_ATTENDEES_DIALOG_WINDOW_URL,
       EVENT_SUMMARY_DIALOG_WINDOW_URL,
     ],
     onLoadWindow: enhanceEditorSurfaceWindow,
