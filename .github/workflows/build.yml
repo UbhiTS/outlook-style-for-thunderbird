@@ -1,0 +1,138 @@
+name: Build add-ons
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: Validate and package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read and validate version
+        id: version
+        shell: pwsh
+        run: |
+          $theme = Get-Content -LiteralPath "src/manifest.json" -Raw | ConvertFrom-Json
+          $companion = Get-Content -LiteralPath "companion/manifest.json" -Raw | ConvertFrom-Json
+          if ($theme.version -ne $companion.version) {
+            throw "Theme version '$($theme.version)' does not match Companion version '$($companion.version)'."
+          }
+          $version = [string]$theme.version
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
+            throw "Unsafe or unsupported package version '$version'."
+          }
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag '$env:GITHUB_REF_NAME' must exactly match manifest version 'v$version'."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact_name=outlook-style-addons-$version" >> $env:GITHUB_OUTPUT
+
+      - name: Validate source
+        shell: pwsh
+        run: |
+          ./scripts/validate.ps1
+          node --check ./companion/scripts/background.js
+          node --check ./companion/scripts/message-display-light.js
+          node --check ./companion/api/OutlookThreadView/implementation.js
+          git diff --check
+
+      - name: Build XPI and ZIP packages
+        shell: pwsh
+        run: ./scripts/build.ps1 -Version "${{ steps.version.outputs.version }}"
+
+      - name: Verify package contents
+        shell: pwsh
+        run: ./scripts/verify-artifacts.ps1 -Version "${{ steps.version.outputs.version }}"
+
+      - name: Create SHA-256 checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $artifacts = @(
+            "dist/outlook-style-for-thunderbird-$version.xpi"
+            "dist/outlook-style-for-thunderbird-$version.zip"
+            "dist/outlook-style-companion-$version.xpi"
+            "dist/outlook-style-companion-$version.zip"
+          )
+          $hashLines = Get-FileHash -Algorithm SHA256 -LiteralPath $artifacts |
+            Sort-Object Path |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)" }
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $PWD "dist/SHA256SUMS.txt"),
+            [string[]]$hashLines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Get-Content -LiteralPath "dist/SHA256SUMS.txt"
+
+      - name: Upload packaged add-ons
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: |
+            dist/outlook-style-for-thunderbird-${{ steps.version.outputs.version }}.xpi
+            dist/outlook-style-for-thunderbird-${{ steps.version.outputs.version }}.zip
+            dist/outlook-style-companion-${{ steps.version.outputs.version }}.xpi
+            dist/outlook-style-companion-${{ steps.version.outputs.version }}.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  release:
+    name: Publish tagged release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-assets
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ADDON_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --title "Outlook Style for Thunderbird $ADDON_VERSION" \
+              --generate-notes \
+              --verify-tag
+          fi

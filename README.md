@@ -77,6 +77,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 
 The script creates matching `.xpi` and `.zip` files in `dist/`, with `manifest.json` at each archive root.
 
+### GitHub Actions builds
+
+The **Build add-ons** workflow runs for pull requests, pushes to `main`, manual
+dispatches, and version tags. It validates both manifests and JavaScript files,
+builds the theme and Companion packages, verifies every archive against its
+source tree, and publishes these workflow artifacts:
+
+- `outlook-style-for-thunderbird-VERSION.xpi`
+- `outlook-style-for-thunderbird-VERSION.zip`
+- `outlook-style-companion-VERSION.xpi`
+- `outlook-style-companion-VERSION.zip`
+- `SHA256SUMS.txt`
+
+Pushing a tag that exactly matches the manifest version, such as `v1.0.20`,
+also creates or updates the matching GitHub Release and attaches the same five
+verified files.
+
 ## Compatibility and limits
 
 - Minimum version: Thunderbird 153.0.3.
