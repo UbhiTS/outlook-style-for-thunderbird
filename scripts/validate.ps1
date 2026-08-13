@@ -3,7 +3,11 @@ param()
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "version.ps1")
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$version = Get-ProjectVersion -ProjectRoot $projectRoot
+$templateVersion = Get-ManifestTemplateVersion
 $sourceDir = Join-Path $projectRoot "src"
 $companionDir = Join-Path $projectRoot "companion"
 $manifestPath = Join-Path $sourceDir "manifest.json"
@@ -14,6 +18,19 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $companionManifest = Get-Content -LiteralPath $companionManifestPath -Raw | ConvertFrom-Json
 
 $errors = [System.Collections.Generic.List[string]]::new()
+
+if ($manifest.version -ne $templateVersion) {
+  $errors.Add("Theme manifest must use the build template version '$templateVersion'.")
+}
+if ($companionManifest.version -ne $templateVersion) {
+  $errors.Add("Companion manifest must use the build template version '$templateVersion'.")
+}
+try {
+  Get-PackagedManifestBytes -ManifestPath $manifestPath -Version $version | Out-Null
+  Get-PackagedManifestBytes -ManifestPath $companionManifestPath -Version $version | Out-Null
+} catch {
+  $errors.Add($_.Exception.Message)
+}
 
 if ($manifest.manifest_version -ne 3) {
   $errors.Add("manifest_version must be 3.")
@@ -29,9 +46,6 @@ if (-not $manifest.theme.colors.frame -or -not $manifest.theme.colors.tab_backgr
 }
 if ($manifest.background -or $manifest.permissions -or $manifest.host_permissions) {
   $errors.Add("This static theme must not request scripts or permissions.")
-}
-if ($companionManifest.version -ne $manifest.version) {
-  $errors.Add("Theme and companion versions must match.")
 }
 if (
   @($companionManifest.permissions) -notcontains "messagesRead" -or

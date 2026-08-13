@@ -1,12 +1,12 @@
 [CmdletBinding()]
-param(
-  [Parameter(Mandatory)]
-  [string]$Version
-)
+param()
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "version.ps1")
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$Version = Get-ProjectVersion -ProjectRoot $projectRoot
 $distDir = Join-Path $projectRoot "dist"
 
 Add-Type -AssemblyName System.IO.Compression
@@ -80,7 +80,19 @@ function Assert-ArchiveMatchesSource {
         } finally {
           $entryStream.Dispose()
         }
-        $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedFiles[$entry.FullName]).Hash
+        if ($entry.FullName -eq "manifest.json") {
+          $expectedBytes = Get-PackagedManifestBytes `
+            -ManifestPath $expectedFiles[$entry.FullName] `
+            -Version $Version
+          $memoryStream = [System.IO.MemoryStream]::new($expectedBytes, $false)
+          try {
+            $sourceHash = Get-StreamSha256 -Stream $memoryStream
+          } finally {
+            $memoryStream.Dispose()
+          }
+        } else {
+          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedFiles[$entry.FullName]).Hash
+        }
         if ($packedHash -ne $sourceHash) {
           throw "Packed file differs from source in $ArchivePath`: $($entry.FullName)"
         }
