@@ -40,7 +40,9 @@ does not create tags or GitHub Releases.
 
 ## Publish manually
 
-- Create a signed tag from the exact reviewed commit.
+- Create an annotated tag from the exact reviewed commit. Cryptographic tag
+  signing is recommended when the maintainer has an established signing key,
+  but it is not a publishing prerequisite.
 - Publish immutable artifacts from the successful workflow run; do not rebuild
   them on another workstation.
 - Include the supported Thunderbird range, elevated Companion access warning,

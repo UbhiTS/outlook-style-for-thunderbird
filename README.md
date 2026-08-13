@@ -155,7 +155,7 @@ resources, roles, and provider-supplied free/busy details. The native dialog is
 now larger, centered, adaptive in light and dark modes, and includes a warning
 that a blank row is ambiguous rather than proof that someone is available.
 
-## Version 1.0.27 exact meeting countdown
+## Version 1.0.27 production hardening
 
 - Shows **in 5 mins** through **in 1 min** before the next accepted meeting,
   and uses **now** only after that meeting has actually started.
@@ -164,6 +164,9 @@ that a blank row is ambiguous rather than proof that someone is available.
 - Adds a full-width current-time line behind the left-aligned pill and gently
   pulses it during the five-minute approach and first three meeting minutes,
   with reduced-motion and forced-colors alternatives.
+- Double-clicking a collapsed thread parent opens exactly the complete message
+  currently shown in the reading pane, instead of opening one window or tab
+  for every hidden reply.
 
 ## Version 1.0.26 consistent thread conversations
 

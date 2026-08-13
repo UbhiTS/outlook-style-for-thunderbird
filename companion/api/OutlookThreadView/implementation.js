@@ -61,6 +61,8 @@ const CONVERSATION_VIEW_STYLE_ID = "outlook-style-conversation-view";
 const MESSAGE_DOCUMENT_URI_PATTERN =
   /^(?:imap|mailbox|news|nntp|snews|file):/i;
 const CONVERSATION_VIEW_LOAD_TIMEOUT_MS = 4000;
+const THREAD_PARENT_OPEN_RETRY_DELAY_MS = 100;
+const THREAD_PARENT_OPEN_MAX_ATTEMPTS = 60;
 const OWNED_CONVERSATION_ATTRIBUTE = "data-outlook-style-owned-conversation";
 const MSG_VIEW_FLAG_DUMMY = 0x20000000;
 const enhancedTodayPaneWindows = new Set();
@@ -782,6 +784,304 @@ function matchConversationMessages(loadedMessages, expectedMessages) {
   return matches;
 }
 
+function getCurrentCollapsedThreadParent(about3Pane, selectedIndex) {
+  try {
+    const dbView = about3Pane?.gDBView;
+    const threadTree = about3Pane?.threadTree;
+    if (
+      about3Pane?.closed ||
+      !dbView ||
+      !threadTree ||
+      !about3Pane.gViewWrapper?.showThreaded ||
+      threadTree.selectedIndex !== selectedIndex ||
+      dbView.selection?.count !== 1 ||
+      threadTree.selectedIndices?.length !== 1 ||
+      threadTree.selectedIndices[0] !== selectedIndex ||
+      dbView.numSelected <= 1 ||
+      dbView.getFlagsAt(selectedIndex) & MSG_VIEW_FLAG_DUMMY ||
+      !dbView.isContainer(selectedIndex) ||
+      dbView.isContainerOpen(selectedIndex)
+    ) {
+      return null;
+    }
+
+    const thread = dbView.getThreadContainingIndex(selectedIndex);
+    const selectedMessage = dbView.getMsgHdrAt(selectedIndex);
+    const rootMessage = thread?.getRootHdr();
+    if (
+      !thread ||
+      thread.numChildren < 2 ||
+      !sameMessage(selectedMessage, rootMessage)
+    ) {
+      return null;
+    }
+
+    const expectedMessages = [];
+    for (let index = 0; index < thread.numChildren; index++) {
+      expectedMessages.push(thread.getChildHdrAt(index));
+    }
+    const selectedMessages = dbView.getSelectedMsgHdrs();
+    if (
+      selectedMessages.length <= 1 ||
+      selectedMessages.length !== expectedMessages.length
+    ) {
+      return null;
+    }
+    const unmatchedExpected = [...expectedMessages];
+    for (const selected of selectedMessages) {
+      const matchIndex = unmatchedExpected.findIndex(expected =>
+        sameMessage(selected, expected)
+      );
+      if (matchIndex < 0) {
+        return null;
+      }
+      unmatchedExpected.splice(matchIndex, 1);
+    }
+    if (unmatchedExpected.length) {
+      return null;
+    }
+
+    return {
+      about3Pane,
+      dbView,
+      expectedMessages,
+      rootMessage,
+      selectedIndex,
+      threadTree,
+    };
+  } catch (error) {
+    /* A view can be replaced between the mouse event and this inspection. */
+    return null;
+  }
+}
+
+function isCurrentCollapsedThreadParentActivation(activation) {
+  try {
+    const topWindow = activation.about3Pane.browsingContext?.topChromeWindow;
+    const tabmail = topWindow?.document?.getElementById("tabmail");
+    if (
+      activation.about3Pane.tabOrWindow?.selected !== true ||
+      tabmail?.currentAbout3Pane !== activation.about3Pane
+    ) {
+      return false;
+    }
+  } catch (error) {
+    return false;
+  }
+  const current = getCurrentCollapsedThreadParent(
+    activation.about3Pane,
+    activation.selectedIndex
+  );
+  if (
+    !current ||
+    current.dbView !== activation.dbView ||
+    current.threadTree !== activation.threadTree ||
+    !sameMessage(current.rootMessage, activation.rootMessage) ||
+    current.expectedMessages.length !== activation.expectedMessages.length
+  ) {
+    return false;
+  }
+  const unmatchedCurrent = [...current.expectedMessages];
+  for (const expected of activation.expectedMessages) {
+    const matchIndex = unmatchedCurrent.findIndex(currentMessage =>
+      sameMessage(expected, currentMessage)
+    );
+    if (matchIndex < 0) {
+      return false;
+    }
+    unmatchedCurrent.splice(matchIndex, 1);
+  }
+  return !unmatchedCurrent.length;
+}
+
+/**
+ * Resolve the exact complete message currently visible in the reading pane.
+ * A collapsed thread can include hidden rows and cross-folder Gloda results,
+ * so never guess from DB row order or trust a Message-ID by itself.
+ */
+function getVerifiedDisplayedThreadMessage(about3Pane, activation) {
+  try {
+    const { expectedMessages, rootMessage } = activation;
+    const messagePane = about3Pane.document.querySelector("message-pane");
+    if (
+      !messagePane?.isConnected ||
+      about3Pane.paneLayout?.messagePaneVisible?.isCollapsed ||
+      messagePane.classList.contains("collapsed-by-splitter")
+    ) {
+      return null;
+    }
+
+    const conversationView = messagePane.querySelector(
+      ":scope > conversation-view"
+    );
+    if (conversationView && !conversationView.hidden) {
+      if (
+        !conversationView.isConnected ||
+        messagePane.conversationView !== conversationView
+      ) {
+        return null;
+      }
+    }
+    if (
+      conversationView?.isConnected &&
+      !conversationView.hidden &&
+      messagePane.conversationView === conversationView
+    ) {
+      if (!hasUniqueMessageIds(expectedMessages)) {
+        return null;
+      }
+      const guard = conversationGuardState.get(conversationView);
+      if (
+        guard &&
+        (guard.disabled ||
+          !guard.ready ||
+          !isExpectedConversationSelection(guard))
+      ) {
+        return null;
+      }
+      const main = conversationView.shadowRoot?.getElementById(
+        "mainConversation"
+      );
+      const expandedArticles = [...(main?.children || [])].filter(child =>
+        child.matches?.('article[aria-expanded="true"]')
+      );
+      if (expandedArticles.length !== 1) {
+        return null;
+      }
+      const browsers = [...expandedArticles[0].children].filter(child =>
+        child.matches?.('browser[src="about:message"]')
+      );
+      if (browsers.length !== 1 || browsers[0].hidden) {
+        return null;
+      }
+      const browser = browsers[0];
+      if (browser.contentWindow?.location?.href !== "about:message") {
+        return null;
+      }
+      const displayedMessage = browser.contentWindow.gMessage;
+      if (!getNativeMessageIdentity(displayedMessage)) {
+        return null;
+      }
+      const loadedMessages = Array.isArray(conversationView.messages)
+        ? conversationView.messages
+        : [];
+      if (!matchConversationMessages(loadedMessages, expectedMessages)) {
+        return null;
+      }
+      const loadedMatches = loadedMessages.filter(message =>
+        sameMessage(message, displayedMessage)
+      );
+      if (loadedMatches.length !== 1) {
+        return null;
+      }
+      const articleMessageId = String(
+        expandedArticles[0].dataset.messageId || ""
+      ).trim();
+      const loadedMessageId = getMessageId(loadedMatches[0]);
+      const displayedMessageId = getMessageId(displayedMessage);
+      if (
+        !articleMessageId ||
+        articleMessageId !== loadedMessageId ||
+        articleMessageId !== displayedMessageId
+      ) {
+        return null;
+      }
+      return displayedMessage;
+    }
+
+    /* Gloda can fail closed to Thunderbird's ordinary full-message reader.
+     * Honor that exact visible message too, but only when it is a unique
+     * native member of the selected thread. */
+    const browser = messagePane.messageBrowser;
+    if (
+      !browser?.isConnected ||
+      browser.hidden ||
+      browser.contentWindow?.location?.href !== "about:message"
+    ) {
+      return null;
+    }
+    const displayedMessage = browser.contentWindow.gMessage;
+    if (!getNativeMessageIdentity(displayedMessage)) {
+      return null;
+    }
+    if (sameMessage(rootMessage, displayedMessage)) {
+      return displayedMessage;
+    }
+    if (
+      !sameCrossFolderCopy(rootMessage, displayedMessage) ||
+      !getMessageId(displayedMessage) ||
+      getMessageId(rootMessage) !== getMessageId(displayedMessage)
+    ) {
+      return null;
+    }
+    return displayedMessage;
+  } catch (error) {
+    /* Readers and their XPConnect headers can disappear during navigation. */
+    return null;
+  }
+}
+
+function openSingleActivatedThreadMessage(about3Pane, message, shiftKey) {
+  try {
+    const topWindow = about3Pane?.browsingContext?.topChromeWindow;
+    const folder = message?.folder;
+    const messageUri = folder?.getUriForMsg(message);
+    if (!topWindow || !folder || !messageUri) {
+      return false;
+    }
+
+    let composeType = null;
+    if (folder.isSpecialFolder(Ci.nsMsgFolderFlags.Drafts, true)) {
+      composeType = Ci.nsIMsgCompType.Draft;
+    } else if (
+      folder.isSpecialFolder(Ci.nsMsgFolderFlags.Templates, true)
+    ) {
+      composeType = Ci.nsIMsgCompType.Template;
+    }
+    if (composeType !== null) {
+      if (typeof topWindow.ComposeMessage !== "function") {
+        return false;
+      }
+      const composeResult = topWindow.ComposeMessage(
+        composeType,
+        shiftKey
+          ? Ci.nsIMsgCompFormat.OppositeOfDefault
+          : Ci.nsIMsgCompFormat.Default,
+        folder,
+        [messageUri],
+        null,
+        undefined
+      );
+      Promise.resolve(composeResult).catch(error => {
+        console.error(
+          "Outlook Style Companion could not open the displayed draft or template:",
+          error
+        );
+      });
+      return true;
+    }
+
+    const tabmail = topWindow.document?.getElementById("tabmail");
+    if (!tabmail) {
+      return false;
+    }
+    MailUtils.displayMessages(
+      [message],
+      about3Pane.gViewWrapper,
+      tabmail,
+      false,
+      shiftKey
+    );
+    return true;
+  } catch (error) {
+    console.error(
+      "Outlook Style Companion could not open the displayed thread message:",
+      error
+    );
+    return false;
+  }
+}
+
 function isExpandedSelectedRoot(
   dbView,
   selectedIndex,
@@ -872,9 +1172,17 @@ function removeConversationSelectionCapture(about3Pane) {
     return;
   }
   state.threadTree.removeEventListener("select", state.onSelect, true);
+  state.threadTree.removeEventListener(
+    "dblclick",
+    state.onDoubleClick,
+    true
+  );
   about3Pane.removeEventListener("unload", state.onUnload);
   if (state.refreshTimer) {
     about3Pane.clearTimeout(state.refreshTimer);
+  }
+  if (state.pendingOpenTimer) {
+    about3Pane.clearTimeout(state.pendingOpenTimer);
   }
   conversationSelectionCaptureState.delete(about3Pane);
   conversationSelectionCapturePanes.delete(about3Pane);
@@ -924,6 +1232,121 @@ function installConversationSelectionCapture(about3Pane, refreshConversation) {
     }, 0);
   };
 
+  const clearPendingOpen = () => {
+    if (!state) {
+      return;
+    }
+    if (state.pendingOpenTimer) {
+      about3Pane.clearTimeout(state.pendingOpenTimer);
+      state.pendingOpenTimer = 0;
+    }
+    state.pendingOpen = null;
+  };
+
+  const tryPendingOpen = () => {
+    const pending = state?.pendingOpen;
+    if (!pending) {
+      return;
+    }
+    state.pendingOpenTimer = 0;
+    if (!isCurrentCollapsedThreadParentActivation(pending.activation)) {
+      clearPendingOpen();
+      return;
+    }
+    const displayedMessage = getVerifiedDisplayedThreadMessage(
+      about3Pane,
+      pending.activation
+    );
+    if (displayedMessage) {
+      const { shiftKey } = pending;
+      clearPendingOpen();
+      openSingleActivatedThreadMessage(
+        about3Pane,
+        displayedMessage,
+        shiftKey
+      );
+      return;
+    }
+    pending.attemptsRemaining--;
+    if (pending.attemptsRemaining <= 0) {
+      clearPendingOpen();
+      return;
+    }
+    state.pendingOpenTimer = about3Pane.setTimeout(
+      tryPendingOpen,
+      THREAD_PARENT_OPEN_RETRY_DELAY_MS
+    );
+  };
+
+  const onDoubleClick = event => {
+    if (
+      event.target?.closest?.("button") ||
+      event.target?.closest?.("menupopup")
+    ) {
+      return;
+    }
+    const row = event.target?.closest?.('tr[is^="thread-"]');
+    if (!row?.isConnected || !threadTree.contains(row)) {
+      return;
+    }
+    const selectedIndex = row.index;
+    let isCollapsedAggregate = false;
+    try {
+      const dbView = about3Pane.gDBView;
+      isCollapsedAggregate = Boolean(
+        Number.isInteger(selectedIndex) &&
+          selectedIndex >= 0 &&
+          selectedIndex === threadTree.selectedIndex &&
+          dbView?.selection?.count === 1 &&
+          threadTree.selectedIndices?.length === 1 &&
+          dbView.numSelected > 1
+      );
+      if (!isCollapsedAggregate) {
+        return;
+      }
+    } catch (error) {
+      return;
+    }
+
+    /* Thunderbird expands a collapsed parent into every hidden child before
+     * running cmd_openMessage. Claim the event before any fallible work so a
+     * stale reader can open zero messages, but can never fall through and open
+     * one window or tab per child. */
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (event.button !== 0) {
+      clearPendingOpen();
+      return;
+    }
+
+    try {
+      if (threadTree.getRowAtIndex(selectedIndex) !== row) {
+        clearPendingOpen();
+        return;
+      }
+    } catch (error) {
+      clearPendingOpen();
+      return;
+    }
+
+    const activation = getCurrentCollapsedThreadParent(
+      about3Pane,
+      selectedIndex
+    );
+    if (!activation) {
+      clearPendingOpen();
+      return;
+    }
+    clearPendingOpen();
+    state.pendingOpen = {
+      activation,
+      attemptsRemaining: THREAD_PARENT_OPEN_MAX_ATTEMPTS,
+      shiftKey: Boolean(event.shiftKey),
+    };
+    tryPendingOpen();
+  };
+
   /* Thunderbird clears the previous reader synchronously in its own bubble
    * listener. A newly-cloned conversation browser is briefly about:blank and
    * does not yet expose displayMessage(), so clear() can throw during rapid
@@ -931,6 +1354,7 @@ function installConversationSelectionCapture(about3Pane, refreshConversation) {
    * handling; Thunderbird then renders the stock selection and the Companion
    * replaces it with the next guarded conversation afterward. */
   const onSelect = () => {
+    clearPendingOpen();
     const messagePane = about3Pane.document.querySelector("message-pane");
     const conversationView = messagePane?.querySelector(
       ":scope > conversation-view"
@@ -984,10 +1408,14 @@ function installConversationSelectionCapture(about3Pane, refreshConversation) {
     removeConversationSelectionCapture(about3Pane);
   };
   threadTree.addEventListener("select", onSelect, true);
+  threadTree.addEventListener("dblclick", onDoubleClick, true);
   about3Pane.addEventListener("unload", onUnload, { once: true });
   state = {
+    onDoubleClick,
     onSelect,
     onUnload,
+    pendingOpen: null,
+    pendingOpenTimer: 0,
     refreshConversation,
     refreshTimer: 0,
     threadTree,
