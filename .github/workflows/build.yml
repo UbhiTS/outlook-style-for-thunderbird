@@ -159,10 +159,15 @@ jobs:
             fi
           fi
 
-          if [[ "$release_exists" == "true" && -z "$tag_target" ]]; then
+          if [[ -z "$tag_target" ]]; then
             gh api --method POST "repos/$GH_REPO/git/refs" \
               -f ref="refs/tags/$RELEASE_TAG" \
               -f sha="$TARGET_SHA" >/dev/null
+            tag_target="$TARGET_SHA"
+          elif [[ "$tag_target" != "$TARGET_SHA" ]]; then
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" \
+              -f sha="$TARGET_SHA" \
+              -F force=true >/dev/null
             tag_target="$TARGET_SHA"
           fi
 
@@ -175,20 +180,10 @@ jobs:
             exit 0
           fi
 
-          create_options=(--target "$TARGET_SHA")
-          if [[ -n "$tag_target" ]]; then
-            if [[ "$tag_target" != "$TARGET_SHA" ]]; then
-              gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" \
-                -f sha="$TARGET_SHA" \
-                -F force=true >/dev/null
-            fi
-            create_options=(--verify-tag --target "$TARGET_SHA")
-          fi
-
           if ! gh release create "$RELEASE_TAG" release-assets/* \
             --title "Outlook Style for Thunderbird $ADDON_VERSION" \
             --generate-notes \
-            "${create_options[@]}"; then
+            --verify-tag; then
             # Treat a release created concurrently by another successful run as success.
             if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
               gh release upload "$RELEASE_TAG" release-assets/* --clobber
