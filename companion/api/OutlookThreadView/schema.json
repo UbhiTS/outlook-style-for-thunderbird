@@ -1,0 +1,42 @@
+[
+  {
+    "namespace": "outlookThreadView",
+    "functions": [
+      {
+        "name": "installTodayPane",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "installReminderDialog",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "installEditorSurfaces",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "installCalendarChooser",
+        "type": "function",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "showParentThread",
+        "type": "function",
+        "async": true,
+        "parameters": [
+          {
+            "name": "tabId",
+            "type": "integer"
+          }
+        ]
+      }
+    ]
+  }
+]

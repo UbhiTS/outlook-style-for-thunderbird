@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "Outlook Style Companion",
+  "version": "1.0.19",
+  "author": "Local custom build",
+  "description": "Keeps messages aligned with the system color scheme, shows parent-thread summaries, and enhances Outlook-style calendar and reminder workflows.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fluent-mail-light-message-view@local",
+      "strict_min_version": "153.0.3"
+    }
+  },
+  "icons": {
+    "32": "icons/fluent-mail.svg",
+    "64": "icons/fluent-mail.svg",
+    "128": "icons/fluent-mail.svg"
+  },
+  "background": {
+    "scripts": [
+      "scripts/background.js"
+    ]
+  },
+  "experiment_apis": {
+    "outlookThreadView": {
+      "schema": "api/OutlookThreadView/schema.json",
+      "parent": {
+        "scopes": [
+          "addon_parent"
+        ],
+        "paths": [
+          [
+            "outlookThreadView"
+          ]
+        ],
+        "script": "api/OutlookThreadView/implementation.js"
+      }
+    }
+  },
+  "permissions": [
+    "messagesRead",
+    "scripting"
+  ],
+  "message_display_scripts": [
+    {
+      "js": [
+        "scripts/message-display-light.js"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}

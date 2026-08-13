@@ -1,0 +1,13 @@
+dist/
+*.log
+.xpi-audit-*/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# Local Thunderbird/Marionette regression harnesses contain machine-specific
+# profile, executable, and temporary-output paths.
+scripts/qa-*.py
+scripts/qa-*.ps1

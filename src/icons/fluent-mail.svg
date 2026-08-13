@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Outlook Style envelope">
+  <rect width="128" height="128" rx="24" fill="#0F6CBD"/>
+  <path d="M25 36h78a9 9 0 0 1 9 9v45a9 9 0 0 1-9 9H25a9 9 0 0 1-9-9V45a9 9 0 0 1 9-9Z" fill="#fff"/>
+  <path d="m20 43 39 31a8 8 0 0 0 10 0l39-31" fill="none" stroke="#0F548C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m20 94 31-27m57 27L77 67" fill="none" stroke="#CFE4FA" stroke-width="6" stroke-linecap="round"/>
+</svg>
