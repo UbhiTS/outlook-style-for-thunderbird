@@ -12,16 +12,6 @@ $distDir = Join-Path $projectRoot "dist"
 $themeManifestPath = Join-Path $sourceDir "manifest.json"
 $companionManifestPath = Join-Path $companionDir "manifest.json"
 $versionPattern = '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$'
-$archiveTimestamp = [System.DateTimeOffset]::new(
-  1980,
-  1,
-  1,
-  0,
-  0,
-  0,
-  [System.TimeSpan]::Zero
-)
-
 foreach ($manifestPath in @($themeManifestPath, $companionManifestPath)) {
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "Source manifest not found: $manifestPath"
@@ -51,8 +41,6 @@ if (-not (Test-Path -LiteralPath $distDir -PathType Container)) {
 $stagingDir = Join-Path $distDir (".build-{0}-{1}" -f $PID, [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $stagingDir | Out-Null
 
-Add-Type -AssemblyName System.IO.Compression
-
 function Get-ArchiveFileMap {
   param([Parameter(Mandatory)] [string]$InputDirectory)
 
@@ -78,6 +66,56 @@ function Get-ArchiveFileMap {
   return $fileMap
 }
 
+$crc32Polynomial = [Convert]::ToUInt32("EDB88320", 16)
+$crc32Table = [uint32[]]::new(256)
+for ($tableIndex = 0; $tableIndex -lt $crc32Table.Length; $tableIndex++) {
+  $tableValue = [uint32]$tableIndex
+  for ($bitIndex = 0; $bitIndex -lt 8; $bitIndex++) {
+    if (($tableValue -band 1) -ne 0) {
+      $tableValue = [uint32](($tableValue -shr 1) -bxor $crc32Polynomial)
+    } else {
+      $tableValue = [uint32]($tableValue -shr 1)
+    }
+  }
+  $crc32Table[$tableIndex] = $tableValue
+}
+
+function Get-FileCrc32 {
+  param([Parameter(Mandatory)] [string]$Path)
+
+  $crc = [uint32]::MaxValue
+  $buffer = [byte[]]::new(65536)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      for ($byteIndex = 0; $byteIndex -lt $bytesRead; $byteIndex++) {
+        $tableIndex = [int](($crc -bxor $buffer[$byteIndex]) -band 255)
+        $crc = [uint32](($crc -shr 8) -bxor $crc32Table[$tableIndex])
+      }
+    }
+  } finally {
+    $stream.Dispose()
+  }
+  return [uint32]($crc -bxor [uint32]::MaxValue)
+}
+
+function Write-StreamContents {
+  param(
+    [Parameter(Mandatory)] [System.IO.BinaryWriter]$Writer,
+    [Parameter(Mandatory)] [string]$Path
+  )
+
+  $buffer = [byte[]]::new(65536)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      $Writer.Write($buffer, 0, $bytesRead)
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function New-DeterministicAddonArchive {
   param(
     [Parameter(Mandatory)] [string]$InputDirectory,
@@ -86,6 +124,33 @@ function New-DeterministicAddonArchive {
   )
 
   $fileMap = Get-ArchiveFileMap -InputDirectory $InputDirectory
+  if ($fileMap.Count -gt [uint16]::MaxValue) {
+    throw "Classic ZIP archives support at most $([uint16]::MaxValue) entries: $InputDirectory"
+  }
+
+  $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+  $entries = [System.Collections.Generic.List[object]]::new()
+  foreach ($item in $fileMap.GetEnumerator()) {
+    $nameBytes = $utf8.GetBytes($item.Key)
+    if ($nameBytes.Length -gt [uint16]::MaxValue) {
+      throw "Archive entry name is too long for classic ZIP: $($item.Key)"
+    }
+
+    $fileLength = (Get-Item -LiteralPath $item.Value).Length
+    if ($fileLength -gt [uint32]::MaxValue) {
+      throw "Archive entry is too large for classic ZIP: $($item.Key)"
+    }
+
+    $entries.Add([pscustomobject]@{
+      Name = $item.Key
+      NameBytes = $nameBytes
+      Path = $item.Value
+      Length = [uint32]$fileLength
+      Crc32 = Get-FileCrc32 -Path $item.Value
+      LocalHeaderOffset = [uint32]0
+    })
+  }
+
   $zipStream = [System.IO.File]::Open(
     $OutputZip,
     [System.IO.FileMode]::CreateNew,
@@ -93,33 +158,77 @@ function New-DeterministicAddonArchive {
     [System.IO.FileShare]::None
   )
   try {
-    $archive = [System.IO.Compression.ZipArchive]::new(
+    $writer = [System.IO.BinaryWriter]::new(
       $zipStream,
-      [System.IO.Compression.ZipArchiveMode]::Create,
-      $false
+      $utf8,
+      $true
     )
     try {
-      foreach ($item in $fileMap.GetEnumerator()) {
-        $entry = $archive.CreateEntry(
-          $item.Key,
-          [System.IO.Compression.CompressionLevel]::Optimal
-        )
-        $entry.LastWriteTime = $archiveTimestamp
-
-        $sourceStream = [System.IO.File]::OpenRead($item.Value)
-        try {
-          $entryStream = $entry.Open()
-          try {
-            $sourceStream.CopyTo($entryStream)
-          } finally {
-            $entryStream.Dispose()
-          }
-        } finally {
-          $sourceStream.Dispose()
+      # Writing STORE entries ourselves avoids runtime-specific DEFLATE output.
+      # Every header field is explicit so PowerShell 5.1 and PowerShell 7 produce
+      # byte-for-byte identical archives without an external packaging tool.
+      foreach ($entry in $entries) {
+        if ($zipStream.Position -gt [uint32]::MaxValue) {
+          throw "Archive is too large for classic ZIP: $OutputZip"
         }
+        $entry.LocalHeaderOffset = [uint32]$zipStream.Position
+
+        $writer.Write([uint32]0x04034B50) # Local file header signature.
+        $writer.Write([uint16]20)         # ZIP 2.0.
+        $writer.Write([uint16]0x0800)     # UTF-8 entry name.
+        $writer.Write([uint16]0)          # STORE (no compression).
+        $writer.Write([uint16]0)          # 00:00:00.
+        $writer.Write([uint16]0x0021)     # 1980-01-01.
+        $writer.Write([uint32]$entry.Crc32)
+        $writer.Write([uint32]$entry.Length)
+        $writer.Write([uint32]$entry.Length)
+        $writer.Write([uint16]$entry.NameBytes.Length)
+        $writer.Write([uint16]0)          # No extra field.
+        $writer.Write([byte[]]$entry.NameBytes)
+        Write-StreamContents -Writer $writer -Path $entry.Path
       }
+
+      if ($zipStream.Position -gt [uint32]::MaxValue) {
+        throw "Archive is too large for classic ZIP: $OutputZip"
+      }
+      $centralDirectoryOffset = [uint32]$zipStream.Position
+
+      foreach ($entry in $entries) {
+        $writer.Write([uint32]0x02014B50) # Central directory signature.
+        $writer.Write([uint16]0x0014)     # Created by MS-DOS, ZIP 2.0.
+        $writer.Write([uint16]20)         # ZIP 2.0.
+        $writer.Write([uint16]0x0800)     # UTF-8 entry name.
+        $writer.Write([uint16]0)          # STORE (no compression).
+        $writer.Write([uint16]0)          # 00:00:00.
+        $writer.Write([uint16]0x0021)     # 1980-01-01.
+        $writer.Write([uint32]$entry.Crc32)
+        $writer.Write([uint32]$entry.Length)
+        $writer.Write([uint32]$entry.Length)
+        $writer.Write([uint16]$entry.NameBytes.Length)
+        $writer.Write([uint16]0)          # No extra field.
+        $writer.Write([uint16]0)          # No file comment.
+        $writer.Write([uint16]0)          # Starting disk.
+        $writer.Write([uint16]0)          # Internal attributes.
+        $writer.Write([uint32]0)          # External attributes.
+        $writer.Write([uint32]$entry.LocalHeaderOffset)
+        $writer.Write([byte[]]$entry.NameBytes)
+      }
+
+      $centralDirectoryLength = $zipStream.Position - $centralDirectoryOffset
+      if ($centralDirectoryLength -gt [uint32]::MaxValue) {
+        throw "Central directory is too large for classic ZIP: $OutputZip"
+      }
+
+      $writer.Write([uint32]0x06054B50) # End of central directory signature.
+      $writer.Write([uint16]0)          # Current disk.
+      $writer.Write([uint16]0)          # Central directory disk.
+      $writer.Write([uint16]$entries.Count)
+      $writer.Write([uint16]$entries.Count)
+      $writer.Write([uint32]$centralDirectoryLength)
+      $writer.Write([uint32]$centralDirectoryOffset)
+      $writer.Write([uint16]0)          # No archive comment.
     } finally {
-      $archive.Dispose()
+      $writer.Dispose()
     }
   } finally {
     $zipStream.Dispose()
