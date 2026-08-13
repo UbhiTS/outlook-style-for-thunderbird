@@ -1,6 +1,6 @@
 # Outlook Style for Thunderbird
 
-Current package version: see [`VERSION`](VERSION).
+Current package version: **1.0.20**.
 
 An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.0.3 and later**. It follows the operating system's light or dark appearance automatically and uses Outlook-inspired Fluent colors in both modes.
 
@@ -31,8 +31,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-VERSION.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-VERSION.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.20.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.20.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -69,12 +69,6 @@ Open an individual reminder's **Snooze for** menu and choose **Until meeting sta
 
 ## Build
 
-[`VERSION`](VERSION) is the only release version source. To publish a new
-version, change that one line and push the commit to `main`; the build injects
-it into both packaged manifests automatically. A successful build creates the
-corresponding `vVERSION` GitHub Release. Rebuilding without changing `VERSION`
-replaces the five assets on the existing release.
-
 On Windows PowerShell:
 
 ```powershell
@@ -85,8 +79,8 @@ The script creates matching `.xpi` and `.zip` files in `dist/`, with `manifest.j
 
 ### GitHub Actions builds
 
-The **Build add-ons** workflow runs for pull requests, pushes to `main`, and
-manual dispatches. It validates both manifests and JavaScript files,
+The **Build add-ons** workflow runs on every push, for pull requests targeting
+`main`, and by manual dispatch. It validates both manifests and JavaScript files,
 builds the theme and Companion packages, verifies every archive against its
 source tree, and publishes these workflow artifacts:
 
@@ -96,12 +90,8 @@ source tree, and publishes these workflow artifacts:
 - `outlook-style-companion-VERSION.zip`
 - `SHA256SUMS.txt`
 
-After a successful `main` build, the workflow automatically creates a tag and
-GitHub Release named `vVERSION` when that project version has not been
-published before, and attaches the same five verified files. Rebuilding an
-existing version replaces its published packages and checksum and moves that
-version tag to the successful build commit. Manually dispatching the workflow
-on `main` performs the same verified rebuild-and-update process.
+The workflow only uploads Actions artifacts; it never creates or updates GitHub
+Releases or tags. Publish a release manually whenever a build is ready.
 
 ## Compatibility and limits
 

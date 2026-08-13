@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Outlook Style for Thunderbird",
-  "version": "0.0.0",
+  "version": "1.0.20",
   "author": "Local custom build",
   "description": "An unofficial adaptive Outlook-style Fluent 2 theme for Mozilla Thunderbird 153.0.3 and later.",
   "browser_specific_settings": {
