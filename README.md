@@ -90,9 +90,12 @@ source tree, and publishes these workflow artifacts:
 - `outlook-style-companion-VERSION.zip`
 - `SHA256SUMS.txt`
 
-Pushing a tag that exactly matches the manifest version, such as `v1.0.20`,
-also creates or updates the matching GitHub Release and attaches the same five
-verified files.
+After a successful `main` build, the workflow automatically creates a tag and
+GitHub Release named `vVERSION` when that manifest version has not been
+published before, and attaches the same five verified files. Rebuilding an
+existing version replaces its published packages and checksum and moves that
+version tag to the successful build commit. Manually dispatching the workflow
+on `main` performs the same verified rebuild-and-update process.
 
 ## Compatibility and limits
 

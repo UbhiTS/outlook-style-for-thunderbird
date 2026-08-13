@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
   pull_request:
     branches:
       - main
@@ -15,8 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -26,6 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       artifact_name: ${{ steps.version.outputs.artifact_name }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
 
     steps:
       - name: Check out source
@@ -46,11 +45,9 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
             throw "Unsafe or unsupported package version '$version'."
           }
-          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
-            throw "Tag '$env:GITHUB_REF_NAME' must exactly match manifest version 'v$version'."
-          }
           "version=$version" >> $env:GITHUB_OUTPUT
           "artifact_name=outlook-style-addons-$version" >> $env:GITHUB_OUTPUT
+          "source_sha=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
 
       - name: Validate source
         shell: pwsh
@@ -104,13 +101,18 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish tagged release
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    name: Publish version release
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+    concurrency:
+      group: release-${{ github.repository_id }}-v${{ needs.build.outputs.version }}
+      queue: max
 
     steps:
       - name: Download verified packages
@@ -119,20 +121,82 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: release-assets
 
-      - name: Create or update GitHub release
+      - name: Create or update version release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}
           ADDON_VERSION: ${{ needs.build.outputs.version }}
+          TARGET_SHA: ${{ needs.build.outputs.source_sha }}
         run: |
           set -euo pipefail
+
+          release_exists=false
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          tag_target=""
+          if tag_target="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq '.sha' 2>/dev/null)"; then
+            if [[ "$tag_target" != "$TARGET_SHA" ]]; then
+              relation="$(gh api "repos/$GH_REPO/compare/$tag_target...$TARGET_SHA" --jq '.status')"
+              if [[ "$relation" == "behind" ]]; then
+                if [[ "$release_exists" == "true" ]]; then
+                  echo "Build $TARGET_SHA is older than published $tag_target; skipping stale release update."
+                  exit 0
+                fi
+                echo "::error::Tag $RELEASE_TAG points to newer commit $tag_target, but no release exists."
+                exit 1
+              fi
+              if [[ "$relation" == "diverged" ]]; then
+                main_sha="$(gh api "repos/$GH_REPO/commits/main" --jq '.sha')"
+                if [[ "$TARGET_SHA" != "$main_sha" ]]; then
+                  echo "Build $TARGET_SHA is not current main $main_sha; skipping diverged stale update."
+                  exit 0
+                fi
+              fi
+            fi
+          fi
+
+          if [[ "$release_exists" == "true" && -z "$tag_target" ]]; then
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" \
+              -f sha="$TARGET_SHA" >/dev/null
+            tag_target="$TARGET_SHA"
+          fi
+
+          if [[ "$release_exists" == "true" ]]; then
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
-          else
-            gh release create "$RELEASE_TAG" release-assets/* \
-              --title "Outlook Style for Thunderbird $ADDON_VERSION" \
-              --generate-notes \
-              --verify-tag
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" \
+              -f sha="$TARGET_SHA" \
+              -F force=true >/dev/null
+            echo "Updated $RELEASE_TAG packages and moved its tag to $TARGET_SHA."
+            exit 0
+          fi
+
+          create_options=(--target "$TARGET_SHA")
+          if [[ -n "$tag_target" ]]; then
+            if [[ "$tag_target" != "$TARGET_SHA" ]]; then
+              gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" \
+                -f sha="$TARGET_SHA" \
+                -F force=true >/dev/null
+            fi
+            create_options=(--verify-tag)
+          fi
+
+          if ! gh release create "$RELEASE_TAG" release-assets/* \
+            --title "Outlook Style for Thunderbird $ADDON_VERSION" \
+            --generate-notes \
+            "${create_options[@]}"; then
+            # Treat a release created concurrently by another successful run as success.
+            if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+              gh release upload "$RELEASE_TAG" release-assets/* --clobber
+              gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$RELEASE_TAG" \
+                -f sha="$TARGET_SHA" \
+                -F force=true >/dev/null
+              echo "Release $RELEASE_TAG was created concurrently and is now updated."
+              exit 0
+            fi
+            exit 1
           fi
