@@ -13,7 +13,6 @@ const { MailServices } = ChromeUtils.importESModule(
 const { MailUtils } = ChromeUtils.importESModule(
   "resource:///modules/MailUtils.sys.mjs"
 );
-
 const TODAY_PANE_LISTENER_ID = "fluent-mail-outlook-inspired-today-pane";
 const MAIN_PANE_SCHEME_LISTENER_ID =
   "outlook-style-companion-main-pane-scheme";
@@ -48,6 +47,11 @@ const DEFAULT_EVENT_WINDOW_WIDTH = 900;
 const DEFAULT_EVENT_WINDOW_HEIGHT = 840;
 const DEFAULT_ATTENDEES_WINDOW_WIDTH = 1100;
 const DEFAULT_ATTENDEES_WINDOW_HEIGHT = 720;
+const CONVERSATION_VIEW_PREF = "mail.thread.conversation.enabled";
+const GLOBAL_INDEXER_PREF = "mailnews.database.global.indexer.enabled";
+const CONVERSATION_VIEW_STYLE_ID = "outlook-style-conversation-view";
+const CONVERSATION_VIEW_LOAD_TIMEOUT_MS = 4000;
+const OWNED_CONVERSATION_ATTRIBUTE = "data-outlook-style-owned-conversation";
 const enhancedTodayPaneWindows = new Set();
 const todayPaneState = new WeakMap();
 let todayPaneListenerRegistered = false;
@@ -63,8 +67,143 @@ let mainPaneSchemeListenerRegistered = false;
 const enhancedCalendarChooserWindows = new Set();
 const calendarChooserState = new WeakMap();
 let calendarChooserListenerRegistered = false;
+const guardedConversationViews = new Set();
+const conversationGuardState = new WeakMap();
 
 const OUTLOOK_COLOR_SCHEME_ATTRIBUTE = "data-outlook-color-scheme";
+
+const CONVERSATION_VIEW_CSS = `
+  :host {
+    background: var(
+      --outlook-surface,
+      var(--layout-background-0, Canvas)
+    );
+    color: var(--outlook-text, var(--layout-color-1, CanvasText));
+  }
+
+  header {
+    background: var(
+      --outlook-surface-alt,
+      var(--layout-background-1, Canvas)
+    );
+    color: var(--outlook-text, var(--layout-color-1, CanvasText));
+    border-block-end-color: var(
+      --outlook-divider,
+      var(--color-surface-border, ButtonBorder)
+    );
+  }
+
+  #mainConversation {
+    background: var(
+      --outlook-surface,
+      var(--layout-background-0, Canvas)
+    );
+    color: var(--outlook-text, var(--layout-color-1, CanvasText));
+  }
+
+  #mainConversation > article[aria-expanded="false"] {
+    box-sizing: border-box;
+    min-block-size: 54px;
+    background: var(
+      --outlook-surface,
+      var(--layout-background-0, Canvas)
+    );
+  }
+
+  #mainConversation > article[aria-expanded="false"]:hover {
+    background: var(
+      --outlook-hover,
+      var(--layout-background-2, ButtonFace)
+    );
+  }
+
+  #mainConversation > article[aria-expanded="false"]:focus-visible {
+    outline: 2px solid var(--outlook-accent, #0f6cbd);
+    outline-offset: -2px;
+    background: var(--outlook-accent-light, #cfe4fa);
+  }
+
+  #mainConversation > article[aria-expanded="true"]:focus-visible {
+    outline: 2px solid var(--outlook-accent, #0f6cbd);
+    outline-offset: -2px;
+  }
+
+  #mainConversation > article[aria-expanded="true"] {
+    background: var(
+      --outlook-surface,
+      var(--layout-background-0, Canvas)
+    );
+  }
+
+  #mainConversation > article[aria-expanded="true"] > browser {
+    background: var(
+      --outlook-surface,
+      var(--layout-background-0, Canvas)
+    );
+    color-scheme: light dark;
+  }
+
+  :host([data-outlook-color-scheme="light"])
+    #mainConversation > article[aria-expanded="true"] > browser {
+    color-scheme: light;
+  }
+
+  :host([data-outlook-color-scheme="dark"])
+    #mainConversation > article[aria-expanded="true"] > browser {
+    color-scheme: dark;
+  }
+
+  #mainConversation > article + article {
+    border-block-start-color: var(
+      --outlook-divider,
+      var(--color-surface-border, ButtonBorder)
+    );
+  }
+
+  #mainConversation address {
+    color: var(--outlook-text, var(--layout-color-1, CanvasText));
+  }
+
+  #mainConversation :is(time, p),
+  header .details {
+    color: var(
+      --outlook-text-secondary,
+      var(--layout-color-2, CanvasText)
+    );
+  }
+
+  @media (forced-colors: active) {
+    :host,
+    header,
+    #mainConversation,
+    #mainConversation > article[aria-expanded] {
+      background: Canvas;
+      color: CanvasText;
+      border-color: ButtonBorder;
+    }
+
+    #mainConversation > article[aria-expanded="false"]:hover {
+      background: ButtonFace;
+    }
+
+    #mainConversation > article[aria-expanded="false"]:focus-visible {
+      background: SelectedItem;
+      color: SelectedItemText;
+      outline: 2px solid SelectedItemText;
+      outline-offset: -2px;
+    }
+
+    #mainConversation > article[aria-expanded="true"]:focus-visible {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
+
+    #mainConversation > article[aria-expanded="false"]:focus-visible
+      :is(address, time, p) {
+      color: SelectedItemText;
+    }
+  }
+`;
 
 function getOutlookColorScheme(window) {
   const nativeScheme = window.document?.documentElement?.getAttribute(
@@ -82,6 +221,239 @@ function getOutlookColorScheme(window) {
   return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches
     ? "dark"
     : "light";
+}
+
+function sameMessage(left, right) {
+  return (
+    left?.messageKey === right?.messageKey &&
+    left?.folder?.URI === right?.folder?.URI
+  );
+}
+
+function isExpectedConversationSelection(state) {
+  const { about3Pane, conversationView, messagePane, rootMessage } = state;
+  try {
+    const dbView = about3Pane.gDBView;
+    const threadTree = about3Pane.threadTree;
+    const selectedIndex = threadTree?.selectedIndex ?? -1;
+    return (
+      !about3Pane.closed &&
+      conversationView.isConnected &&
+      messagePane.querySelector(":scope > conversation-view") ===
+        conversationView &&
+      selectedIndex >= 0 &&
+      dbView?.selection?.count === 1 &&
+      dbView.numSelected === 1 &&
+      sameMessage(dbView.getMsgHdrAt(selectedIndex), rootMessage)
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+function removeConversationGuard(conversationView) {
+  const state = conversationGuardState.get(conversationView);
+  if (state?.timeoutId) {
+    state.about3Pane.clearTimeout(state.timeoutId);
+  }
+  state?.observer.disconnect();
+  conversationGuardState.delete(conversationView);
+  guardedConversationViews.delete(conversationView);
+}
+
+function retireConversationView(messagePane, conversationView) {
+  if (!conversationView) {
+    return;
+  }
+  conversationView.hidden = true;
+  try {
+    conversationView.clear();
+  } catch (error) {
+    /* A retiring native host may be between asynchronous lifecycle callbacks. */
+  }
+  removeConversationGuard(conversationView);
+  conversationView.remove();
+  if (messagePane?.conversationView === conversationView) {
+    messagePane.conversationView = null;
+  }
+}
+
+function retireGuardedConversationWithFallback(conversationView) {
+  const state = conversationGuardState.get(conversationView);
+  if (!state) {
+    return;
+  }
+  const shouldRestore = isExpectedConversationSelection(state);
+  const { messagePane, rootMessage } = state;
+  retireConversationView(messagePane, conversationView);
+  if (shouldRestore && rootMessage) {
+    try {
+      messagePane.displayMessage(rootMessage.folder.getUriForMsg(rootMessage));
+    } catch (error) {
+      /* The containing mail window may be closing at the same time. */
+    }
+  }
+}
+
+function validateGuardedConversation(conversationView) {
+  const state = conversationGuardState.get(conversationView);
+  if (!state) {
+    return;
+  }
+
+  /* If the user independently enables Thunderbird's native conversation
+   * feature, immediately relinquish this host instead of applying an old
+   * Companion expectation to a native selection that may reuse it. */
+  if (state.userConversationViewEnabled) {
+    conversationView.removeAttribute(OWNED_CONVERSATION_ATTRIBUTE);
+    conversationView.hidden = false;
+    removeConversationGuard(conversationView);
+    return;
+  }
+
+  if (!state.main.childElementCount) {
+    return;
+  }
+
+  if (state.disabled || !isExpectedConversationSelection(state)) {
+    if (state.timeoutId) {
+      state.about3Pane.clearTimeout(state.timeoutId);
+      state.timeoutId = 0;
+    }
+    state.disabled = true;
+    retireConversationView(state.messagePane, conversationView);
+    return;
+  }
+
+  const loadedMessages = Array.isArray(conversationView.messages)
+    ? conversationView.messages
+    : [];
+  const expandedArticle = state.main.querySelector(
+    'article[aria-expanded="true"]'
+  );
+  const expandedBrowser = expandedArticle?.querySelector(
+    'browser[src="about:message"]'
+  );
+  if (
+    loadedMessages.some(message =>
+      state.rootMessage.messageId
+        ? message?.messageId === state.rootMessage.messageId
+        : sameMessage(message, state.rootMessage)
+    )
+  ) {
+    /* Thunderbird cannot safely swap the expanded reader until its initial
+     * MsgLoaded callback has stamped the open article. Keep the whole host
+     * hidden (and therefore unclickable) until that native lifecycle finishes. */
+    if (
+      !expandedBrowser ||
+      expandedBrowser.hidden ||
+      !expandedArticle.dataset.messageId
+    ) {
+      return;
+    }
+    if (state.timeoutId) {
+      state.about3Pane.clearTimeout(state.timeoutId);
+      state.timeoutId = 0;
+    }
+    conversationView.hidden = false;
+    return;
+  }
+
+  /* A query that does not contain the selected root must never replace the
+   * reading pane. The host is still hidden, so fall back before it can paint. */
+  if (state.timeoutId) {
+    state.about3Pane.clearTimeout(state.timeoutId);
+    state.timeoutId = 0;
+  }
+  state.disabled = true;
+  try {
+    retireConversationView(state.messagePane, conversationView);
+    state.messagePane.displayMessage(
+      state.rootMessage.folder.getUriForMsg(state.rootMessage)
+    );
+  } catch (error) {
+    /* A failed recovery must stay blank instead of exposing another thread. */
+    state.disabled = true;
+    conversationView.hidden = true;
+    state.main.replaceChildren();
+    try {
+      state.messagePane.displayMessage(
+        state.rootMessage.folder.getUriForMsg(state.rootMessage)
+      );
+    } catch (displayError) {
+      /* Leave both stale and failed readers hidden. */
+    }
+  }
+}
+
+function guardConversationView(
+  about3Pane,
+  messagePane,
+  conversationView,
+  rootMessage
+) {
+  const main = conversationView?.shadowRoot?.getElementById(
+    "mainConversation"
+  );
+  if (!main) {
+    return false;
+  }
+
+  let state = conversationGuardState.get(conversationView);
+  if (!state || state.main !== main) {
+    removeConversationGuard(conversationView);
+    const observer = new about3Pane.MutationObserver(() => {
+      validateGuardedConversation(conversationView);
+    });
+    observer.observe(main, {
+      attributes: true,
+      attributeFilter: ["data-message-id", "hidden"],
+      childList: true,
+      subtree: true,
+    });
+    state = { main, observer };
+    conversationGuardState.set(conversationView, state);
+    guardedConversationViews.add(conversationView);
+  }
+  Object.assign(state, {
+    about3Pane,
+    conversationView,
+    disabled: false,
+    messagePane,
+    rootMessage,
+    userConversationViewEnabled: false,
+  });
+  if (state.timeoutId) {
+    about3Pane.clearTimeout(state.timeoutId);
+  }
+  state.timeoutId = about3Pane.setTimeout(() => {
+    state.timeoutId = 0;
+    if (state.userConversationViewEnabled) {
+      validateGuardedConversation(conversationView);
+      return;
+    }
+    if (
+      !state.disabled &&
+      conversationView.hidden &&
+      isExpectedConversationSelection(state)
+    ) {
+      state.disabled = true;
+      retireConversationView(state.messagePane, conversationView);
+      try {
+        state.messagePane.displayMessage(
+          state.rootMessage.folder.getUriForMsg(state.rootMessage)
+        );
+      } catch (error) {
+        /* Keep the empty experimental view hidden if the fallback also fails. */
+      }
+    }
+  }, CONVERSATION_VIEW_LOAD_TIMEOUT_MS);
+  /* Do not paint an asynchronous result until it has been matched to the live
+   * root selection. A correct population unhides the view in the observer's
+   * pre-paint microtask. */
+  conversationView.hidden = true;
+  validateGuardedConversation(conversationView);
+  return true;
 }
 
 function getAbout3PaneWindows(window) {
@@ -106,11 +478,21 @@ function getAbout3PaneWindows(window) {
 
 function getAboutMessageBrowsers(about3Pane) {
   try {
-    return new Set(
+    const browsers = new Set(
       about3Pane.document.querySelectorAll(
         'browser[src="about:message"], #messageBrowser, #multiMessageBrowser'
       )
     );
+    const conversationView = about3Pane.document.querySelector(
+      "message-pane > conversation-view"
+    );
+    for (const browser of
+      conversationView?.shadowRoot?.querySelectorAll(
+        'browser[src="about:message"]'
+      ) || []) {
+      browsers.add(browser);
+    }
+    return browsers;
   } catch (error) {
     return new Set();
   }
@@ -138,9 +520,12 @@ function installMainPaneSchemeBridge(window) {
   const state = {
     schemeFrame: 0,
     retryTimer: 0,
+    shuttingDown: false,
     trackedDocuments: new Set(),
     browserListeners: new Map(),
     paneListeners: new Map(),
+    conversationListeners: new Map(),
+    browserDocuments: new Map(),
   };
 
   const stampDocument = (document, scheme) => {
@@ -154,23 +539,265 @@ function installMainPaneSchemeBridge(window) {
     }
   };
 
+  const untrackBrowserDocument = browser => {
+    const document = state.browserDocuments.get(browser);
+    if (!document) {
+      return;
+    }
+    try {
+      document.documentElement?.removeAttribute(
+        OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+      );
+    } catch (error) {
+      /* A replaced about:message document may already be destroyed. */
+    }
+    state.trackedDocuments.delete(document);
+    state.browserDocuments.delete(browser);
+  };
+
+  const stampBrowserDocument = (browser, document, scheme) => {
+    const previousDocument = state.browserDocuments.get(browser);
+    if (previousDocument && previousDocument !== document) {
+      untrackBrowserDocument(browser);
+    }
+    stampDocument(document, scheme);
+    if (document?.documentElement) {
+      state.browserDocuments.set(browser, document);
+    }
+  };
+
   const bindBrowser = browser => {
     if (!browser || state.browserListeners.has(browser)) {
       return;
     }
-    const onLoad = () => scheduleSync();
+    const onLoad = () => {
+      untrackBrowserDocument(browser);
+      scheduleSync();
+    };
     browser.addEventListener("load", onLoad, true);
     state.browserListeners.set(browser, onLoad);
   };
 
+  const removeConversationBinding = conversationView => {
+    const listener = state.conversationListeners.get(conversationView);
+    if (!listener) {
+      removeConversationGuard(conversationView);
+      return;
+    }
+    listener.observer.disconnect();
+    listener.main.removeEventListener("keydown", listener.onKeyDown);
+    listener.main.removeEventListener("click", listener.onClick, true);
+    for (const browser of listener.main.querySelectorAll(
+      'browser[src="about:message"]'
+    )) {
+      const onLoad = state.browserListeners.get(browser);
+      if (onLoad) {
+        browser.removeEventListener("load", onLoad, true);
+        state.browserListeners.delete(browser);
+      }
+      untrackBrowserDocument(browser);
+    }
+    for (const article of listener.main.querySelectorAll(
+      'article[data-outlook-style-openable="true"]'
+    )) {
+        article.removeAttribute("data-outlook-style-openable");
+        if (article.getAttribute("data-outlook-style-tabindex") === "true") {
+          article.removeAttribute("tabindex");
+          article.removeAttribute("data-outlook-style-tabindex");
+        }
+    }
+    for (const article of listener.main.querySelectorAll(
+      'article[data-outlook-style-focus-target="true"]'
+    )) {
+      article.removeAttribute("tabindex");
+      article.removeAttribute("data-outlook-style-focus-target");
+    }
+    listener.style.remove();
+    conversationView.removeAttribute("data-outlook-style-conversation");
+    conversationView.removeAttribute(OUTLOOK_COLOR_SCHEME_ATTRIBUTE);
+    state.conversationListeners.delete(conversationView);
+    removeConversationGuard(conversationView);
+  };
+
+  const bindConversationView = (about3Pane, scheme) => {
+    const conversationView = about3Pane.document.querySelector(
+      "message-pane > conversation-view"
+    );
+    const shadowRoot = conversationView?.shadowRoot;
+    const main = shadowRoot?.getElementById("mainConversation");
+    if (!conversationView || !shadowRoot || !main) {
+      return;
+    }
+    conversationView.setAttribute(OUTLOOK_COLOR_SCHEME_ATTRIBUTE, scheme);
+
+    let listener = state.conversationListeners.get(conversationView);
+    const decorate = () => {
+      for (const article of main.querySelectorAll(
+        'article[aria-expanded="false"]'
+      )) {
+        article.setAttribute("data-outlook-style-openable", "true");
+        if (!article.hasAttribute("tabindex")) {
+          article.tabIndex = 0;
+          article.setAttribute("data-outlook-style-tabindex", "true");
+        }
+      }
+      for (const browser of shadowRoot.querySelectorAll(
+        'browser[src="about:message"]'
+      )) {
+        bindBrowser(browser);
+        try {
+          if (browser.contentWindow?.location?.href === "about:message") {
+            stampBrowserDocument(
+              browser,
+              browser.contentWindow.document,
+              conversationView.getAttribute(
+                OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+              ) || scheme
+            );
+          }
+        } catch (error) {
+          /* The embedded reader may still be navigating to about:message. */
+        }
+      }
+    };
+
+    if (!listener || listener.main !== main) {
+      if (listener) {
+        removeConversationBinding(conversationView);
+      }
+      const style = about3Pane.document.createElement("style");
+      style.id = CONVERSATION_VIEW_STYLE_ID;
+      style.textContent = CONVERSATION_VIEW_CSS;
+      shadowRoot.appendChild(style);
+
+      const onKeyDown = event => {
+        if (
+          (event.key !== "Enter" && event.key !== " ") ||
+          event.repeat ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey
+        ) {
+          return;
+        }
+        const article = event.target?.closest?.(
+          'article[aria-expanded="false"]'
+        );
+        if (!article || !main.contains(article)) {
+          return;
+        }
+        const openBrowser = main.querySelector(
+          'article[aria-expanded="true"] > browser[src="about:message"]'
+        );
+        if (
+          openBrowser?.hidden ||
+          !openBrowser?.parentElement?.dataset?.messageId
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        article.click();
+        about3Pane.setTimeout(() => {
+          const expandedArticle = main.querySelector(
+            'article[aria-expanded="true"]'
+          );
+          const browser = expandedArticle?.querySelector(
+            'browser[src="about:message"]'
+          );
+          if (expandedArticle) {
+            expandedArticle.tabIndex = -1;
+            expandedArticle.setAttribute(
+              "data-outlook-style-focus-target",
+              "true"
+            );
+            expandedArticle.focus();
+          }
+          if (browser) {
+            const focusBrowser = () => browser.focus();
+            if (browser.hidden) {
+              browser.addEventListener("MsgLoaded", focusBrowser, {
+                capture: true,
+                once: true,
+              });
+            } else {
+              focusBrowser();
+            }
+          }
+        }, 0);
+      };
+      const onClick = event => {
+        const article = event.target?.closest?.(
+          'article[aria-expanded="false"]'
+        );
+        if (!article || !main.contains(article)) {
+          return;
+        }
+        const openBrowser = main.querySelector(
+          'article[aria-expanded="true"] > browser[src="about:message"]'
+        );
+        if (
+          openBrowser?.hidden ||
+          !openBrowser?.parentElement?.dataset?.messageId
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      };
+      main.addEventListener("keydown", onKeyDown);
+      main.addEventListener("click", onClick, true);
+      const observer = new about3Pane.MutationObserver(() => {
+        decorate();
+        scheduleSync();
+      });
+      observer.observe(main, { childList: true, subtree: true });
+      listener = { main, observer, onClick, onKeyDown, style };
+      state.conversationListeners.set(conversationView, listener);
+      conversationView.setAttribute(
+        "data-outlook-style-conversation",
+        "true"
+      );
+    }
+    decorate();
+  };
+
   const bindAbout3Pane = (about3Pane, scheme) => {
-    stampDocument(about3Pane.document, scheme);
+    const paneDocument = about3Pane.document;
+    stampDocument(paneDocument, scheme);
+    const previousListener = state.paneListeners.get(about3Pane);
+    if (previousListener?.paneDocument !== paneDocument) {
+      previousListener?.paneDocument.removeEventListener(
+        "load",
+        previousListener.onLoad,
+        true
+      );
+      previousListener?.observer?.disconnect();
+      state.paneListeners.delete(about3Pane);
+    }
     if (!state.paneListeners.has(about3Pane)) {
-      const paneDocument = about3Pane.document;
       const onLoad = () => scheduleSync();
       paneDocument.addEventListener("load", onLoad, true);
-      state.paneListeners.set(about3Pane, { paneDocument, onLoad });
+      const observer = new about3Pane.MutationObserver(scheduleSync);
+      state.paneListeners.set(about3Pane, {
+        paneDocument,
+        onLoad,
+        observer,
+        observedMessagePane: null,
+      });
     }
+    const paneListener = state.paneListeners.get(about3Pane);
+    const messagePane = paneDocument.querySelector("message-pane");
+    if (
+      messagePane &&
+      paneListener.observedMessagePane !== messagePane
+    ) {
+      paneListener.observer.disconnect();
+      paneListener.observer.observe(messagePane, { childList: true });
+      paneListener.observedMessagePane = messagePane;
+    }
+    bindConversationView(about3Pane, scheme);
     for (const browser of getAboutMessageBrowsers(about3Pane)) {
       bindBrowser(browser);
       try {
@@ -182,7 +809,7 @@ function installMainPaneSchemeBridge(window) {
             "chrome://messenger/content/multimessageview.xhtml"
           )
         ) {
-          stampDocument(contentWindow.document, scheme);
+          stampBrowserDocument(browser, contentWindow.document, scheme);
         }
       } catch (error) {
         /* The browser may still be navigating to its chrome document. */
@@ -207,6 +834,7 @@ function installMainPaneSchemeBridge(window) {
     for (const [browser, onLoad] of [...state.browserListeners]) {
       if (!browser.isConnected) {
         browser.removeEventListener("load", onLoad, true);
+        untrackBrowserDocument(browser);
         state.browserListeners.delete(browser);
       }
     }
@@ -217,12 +845,18 @@ function installMainPaneSchemeBridge(window) {
           listener.onLoad,
           true
         );
+        listener.observer?.disconnect();
         state.paneListeners.delete(about3Pane);
+      }
+    }
+    for (const conversationView of [...state.conversationListeners.keys()]) {
+      if (!conversationView.isConnected) {
+        removeConversationBinding(conversationView);
       }
     }
   };
   const scheduleSync = () => {
-    if (window.closed || state.schemeFrame) {
+    if (window.closed || state.shuttingDown || state.schemeFrame) {
       return;
     }
     state.schemeFrame = window.requestAnimationFrame(syncScheme);
@@ -246,9 +880,11 @@ function installMainPaneSchemeBridge(window) {
   }, 1000);
   Object.assign(state, {
     scheduleSync,
+    removeConversationBinding,
     systemScheme,
     tabmail,
     tabEventTarget,
+    untrackBrowserDocument,
   });
   mainPaneSchemeState.set(window, state);
   enhancedMainPaneSchemeWindows.add(window);
@@ -260,6 +896,7 @@ function removeMainPaneSchemeBridge(window) {
   if (!state) {
     return;
   }
+  state.shuttingDown = true;
   window.removeEventListener("windowlwthemeupdate", state.scheduleSync);
   state.systemScheme.removeEventListener("change", state.scheduleSync);
   state.tabEventTarget.removeEventListener("TabSelect", state.scheduleSync);
@@ -272,9 +909,26 @@ function removeMainPaneSchemeBridge(window) {
   }
   for (const [browser, onLoad] of state.browserListeners) {
     browser.removeEventListener("load", onLoad, true);
+    state.untrackBrowserDocument(browser);
   }
   for (const listener of state.paneListeners.values()) {
     listener.paneDocument.removeEventListener("load", listener.onLoad, true);
+    listener.observer?.disconnect();
+  }
+  const ownedConversations = [];
+  for (const about3Pane of getAbout3PaneWindows(window)) {
+    const conversationView = about3Pane.document.querySelector(
+      `message-pane > conversation-view[${OWNED_CONVERSATION_ATTRIBUTE}="true"]`
+    );
+    if (conversationView) {
+      ownedConversations.push(conversationView);
+    }
+  }
+  for (const conversationView of ownedConversations) {
+    retireGuardedConversationWithFallback(conversationView);
+  }
+  for (const conversationView of [...state.conversationListeners.keys()]) {
+    state.removeConversationBinding(conversationView);
   }
   for (const document of state.trackedDocuments) {
     try {
@@ -3386,6 +4040,9 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
       );
       mainPaneSchemeListenerRegistered = false;
     }
+    for (const conversationView of [...guardedConversationViews]) {
+      retireGuardedConversationWithFallback(conversationView);
+    }
     for (const window of [...enhancedReminderDialogWindows]) {
       removeReminderDialogEnhancement(window);
     }
@@ -3453,6 +4110,23 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
           const threadTree = about3Pane.threadTree;
           const messagePane = about3Pane.document.querySelector("message-pane");
           const selectedIndex = threadTree?.selectedIndex ?? -1;
+          const ownedConversationView = messagePane?.querySelector(
+            `:scope > conversation-view[${OWNED_CONVERSATION_ATTRIBUTE}="true"]`
+          );
+
+          /* Thunderbird's legacy multi-message branch does not clear a native
+           * conversation host. Remove only the host created for our previous
+           * expanded parent before any non-target selection can leave it over
+           * a collapsed-thread or multi-selection summary. Respect a user's
+           * independently enabled native conversation view. */
+          const retireOwnedConversation = () => {
+            if (
+              ownedConversationView &&
+              !Services.prefs.getBoolPref(CONVERSATION_VIEW_PREF, false)
+            ) {
+              retireConversationView(messagePane, ownedConversationView);
+            }
+          };
 
           /* A collapsed thread already counts all of its messages as selected
            * and is summarized natively. The one/one condition isolates an
@@ -3465,16 +4139,19 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
             dbView.numSelected !== 1 ||
             !dbView.isContainer(selectedIndex)
           ) {
+            retireOwnedConversation();
             return false;
           }
 
           const MSG_VIEW_FLAG_DUMMY = 0x20000000;
           if (dbView.getFlagsAt(selectedIndex) & MSG_VIEW_FLAG_DUMMY) {
+            retireOwnedConversation();
             return false;
           }
 
           const thread = dbView.getThreadContainingIndex(selectedIndex);
           if (!thread || thread.numChildren < 2) {
+            retireOwnedConversation();
             return false;
           }
 
@@ -3484,6 +4161,7 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
             selectedMessage?.messageKey !== rootMessage?.messageKey ||
             selectedMessage?.folder?.URI !== rootMessage?.folder?.URI
           ) {
+            retireOwnedConversation();
             return false;
           }
 
@@ -3492,17 +4170,127 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
             messages.push(thread.getChildHdrAt(index));
           }
 
-          /* Revalidate after collecting the headers in case the user moved to
-           * another message while the event crossed the extension boundary. */
-          if (
-            threadTree.selectedIndex !== selectedIndex ||
-            dbView.selection?.count !== 1 ||
-            dbView.numSelected !== 1
-          ) {
+          /* Thunderbird's legacy multi-message summary permanently truncates
+           * every message to a short snippet. Prefer its native conversation
+           * accordion, which lazy-loads the complete message in an embedded
+           * about:message reader when a compact row is activated. Gloda owns
+           * that view's thread membership, so do not replace the already-full
+           * parent message unless every visible member is safely indexed. */
+          let canUseConversationView = false;
+          try {
+            if (
+              Services.prefs.getBoolPref(GLOBAL_INDEXER_PREF, true) &&
+              about3Pane.document.getElementById(
+                "conversationViewTemplate"
+              ) &&
+              about3Pane.document.getElementById(
+                "conversationViewMessageBrowserTemplate"
+              )
+            ) {
+              const { Gloda } = ChromeUtils.importESModule(
+                "resource:///modules/gloda/GlodaPublic.sys.mjs"
+              );
+              canUseConversationView = messages.every(message =>
+                Gloda.isMessageIndexed(message)
+              );
+            }
+          } catch (error) {
+            /* Unsupported folders and an index being rebuilt are safe
+             * fallbacks: keep Thunderbird's full single-message reader. */
+            canUseConversationView = false;
+          }
+
+          if (!canUseConversationView) {
+            retireOwnedConversation();
             return false;
           }
 
-          messagePane.displayMessages(messages);
+          /* If the user has enabled Thunderbird's own conversation feature,
+           * its selection pipeline already owns rendering and preference
+           * semantics. Do not replace/reuse that native host or layer a second
+           * asynchronous Gloda request on top of it. */
+          const userConversationViewEnabled =
+            Services.prefs.getBoolPref(CONVERSATION_VIEW_PREF, false);
+          if (userConversationViewEnabled) {
+            ownedConversationView?.removeAttribute(
+              OWNED_CONVERSATION_ATTRIBUTE
+            );
+            removeConversationGuard(ownedConversationView);
+            return false;
+          }
+
+          /* Revalidate after collecting the headers in case the user moved to
+           * another message while the event crossed the extension boundary. */
+          if (
+            about3Pane.gDBView !== dbView ||
+            threadTree.selectedIndex !== selectedIndex ||
+            dbView.selection?.count !== 1 ||
+            dbView.numSelected !== 1 ||
+            !sameMessage(dbView.getMsgHdrAt(selectedIndex), rootMessage)
+          ) {
+            retireOwnedConversation();
+            return false;
+          }
+
+          /* The native accordion is still pref-gated in Thunderbird 153.
+           * Enable it only for this synchronous display call and restore the
+           * user's preference immediately, so the Companion does not leave a
+           * hidden global setting behind or alter unrelated selections. */
+          const hadConversationUserValue =
+            Services.prefs.prefHasUserValue(CONVERSATION_VIEW_PREF);
+          const previousConversationValue = Services.prefs.getBoolPref(
+            CONVERSATION_VIEW_PREF,
+            false
+          );
+          if (previousConversationValue) {
+            return false;
+          }
+          /* Host identity is the request-generation boundary. Thunderbird 153
+           * does not cancel a conversation's async Gloda, snippet, or MsgLoaded
+           * callbacks, so never reuse a host from an earlier root selection. */
+          retireConversationView(
+            messagePane,
+            messagePane.querySelector(":scope > conversation-view")
+          );
+          const shouldRestoreConversationPref =
+            !previousConversationValue || !hadConversationUserValue;
+          if (!previousConversationValue) {
+            Services.prefs.setBoolPref(CONVERSATION_VIEW_PREF, true);
+          }
+          try {
+            messagePane.displayMessages(messages);
+            const conversationView = messagePane.querySelector(
+              ":scope > conversation-view"
+            );
+            conversationView?.setAttribute(
+              OWNED_CONVERSATION_ATTRIBUTE,
+              "true"
+            );
+            if (
+              !guardConversationView(
+                about3Pane,
+                messagePane,
+                conversationView,
+                rootMessage
+              )
+            ) {
+              messagePane.displayMessage(
+                rootMessage.folder.getUriForMsg(rootMessage)
+              );
+              return false;
+            }
+          } finally {
+            if (shouldRestoreConversationPref) {
+              if (hadConversationUserValue) {
+                Services.prefs.setBoolPref(
+                  CONVERSATION_VIEW_PREF,
+                  previousConversationValue
+                );
+              } else {
+                Services.prefs.clearUserPref(CONVERSATION_VIEW_PREF);
+              }
+            }
+          }
           return true;
         },
       },

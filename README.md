@@ -1,6 +1,6 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.20**.
+Current package version: **1.0.21**.
 
 An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.0.3 and later**. It follows the operating system's light or dark appearance automatically and uses Outlook-inspired Fluent colors in both modes.
 
@@ -15,7 +15,7 @@ Together they provide:
 - Coordinated light and dark reading, compose, settings, calendar, and reminder surfaces
 - Compact folder and message-list panes with subtle separators
 - A grid-edge blue rail for unread messages, regular read messages, and an outlined Fluent selection
-- Native indented thread guides and Outlook-like thread summaries
+- Native indented thread guides and an Outlook-like full-message conversation accordion
 - Segoe UI when available, with system-font fallbacks
 - An Outlook-style Spaces application rail
 - An Outlook My Day-inspired Calendar and To Do pane
@@ -31,8 +31,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.20.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.20.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.21.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.21.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -125,6 +125,17 @@ Use **Scheduling assistant** for optional attendees, rooms,
 resources, roles, and provider-supplied free/busy details. The native dialog is
 now larger, centered, adaptive in light and dark modes, and includes a warning
 that a blank row is ambiguous rather than proof that someone is available.
+
+## Version 1.0.21 full thread messages
+
+- Replaces Thunderbird's permanently truncated parent-thread snippets with its
+  native full-message conversation accordion when the thread index is ready.
+- Opens any compact parent or reply in place with the complete trusted message
+  reader; HTML, attachments, invitations, remote-content protection, and
+  signed or encrypted messages remain handled by Thunderbird.
+- Adds keyboard activation and focus treatment, preserves live light/dark
+  switching, and safely keeps the complete parent reader when indexing is not
+  available instead of showing a clipped or empty summary.
 
 ## Version 1.0.20 event guests and scheduling
 

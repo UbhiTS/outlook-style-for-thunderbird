@@ -72,9 +72,9 @@ messenger.runtime.onStartup.addListener(installOutlookEnhancements);
 installOutlookEnhancements();
 
 /* Thunderbird already summarizes collapsed threads. For an expanded thread,
- * ask the companion API to replace the parent's single-message reader with
- * Thunderbird's native multi-message thread summary. The API revalidates the
- * current selection and leaves child-message and standalone selections alone. */
+ * ask the companion API for its native conversation accordion so every compact
+ * message can open its complete trusted reader in place. The API revalidates
+ * the current selection and leaves child and standalone selections alone. */
 messenger.mailTabs.onSelectedMessagesChanged.addListener(tab => {
   messenger.outlookThreadView.showParentThread(tab.id).catch(error => {
     console.error(
