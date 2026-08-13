@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Outlook Style for Thunderbird",
-  "version": "1.0.21",
-  "author": "Local custom build",
-  "description": "An unofficial adaptive Outlook-style Fluent 2 theme for Mozilla Thunderbird 153.0.3 and later.",
+  "version": "1.0.27",
+  "author": "Outlook Style for Thunderbird contributors",
+  "homepage_url": "https://github.com/UbhiTS/outlook-style-for-thunderbird",
+  "description": "An unofficial adaptive Outlook-style Fluent 2 theme for Mozilla Thunderbird 153.x.",
   "browser_specific_settings": {
     "gecko": {
       "id": "{c53d41f1-6d13-4a72-b250-b089f6ba56a1}",
-      "strict_min_version": "153.0.3"
+      "strict_min_version": "153.0.3",
+      "strict_max_version": "153.*"
     }
   },
   "icons": {

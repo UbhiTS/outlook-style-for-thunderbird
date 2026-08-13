@@ -36,7 +36,7 @@ jobs:
             throw "Theme version '$($theme.version)' does not match Companion version '$($companion.version)'."
           }
           $version = [string]$theme.version
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?$') {
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$') {
             throw "Unsafe or unsupported package version '$version'."
           }
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -47,37 +47,16 @@ jobs:
         run: |
           ./scripts/validate.ps1
           node --check ./companion/scripts/background.js
-          node --check ./companion/scripts/message-display-light.js
           node --check ./companion/api/OutlookThreadView/implementation.js
           git diff --check
 
-      - name: Build XPI and ZIP packages
+      - name: Build and verify reproducible packages
         shell: pwsh
-        run: ./scripts/build.ps1 -Version "${{ steps.version.outputs.version }}"
+        run: ./scripts/verify-reproducible-build.ps1 -Version "${{ steps.version.outputs.version }}"
 
-      - name: Verify package contents
+      - name: Verify final package contents and checksums
         shell: pwsh
         run: ./scripts/verify-artifacts.ps1 -Version "${{ steps.version.outputs.version }}"
-
-      - name: Create SHA-256 checksums
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $artifacts = @(
-            "dist/outlook-style-for-thunderbird-$version.xpi"
-            "dist/outlook-style-for-thunderbird-$version.zip"
-            "dist/outlook-style-companion-$version.xpi"
-            "dist/outlook-style-companion-$version.zip"
-          )
-          $hashLines = Get-FileHash -Algorithm SHA256 -LiteralPath $artifacts |
-            Sort-Object Path |
-            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $_.Path)" }
-          [System.IO.File]::WriteAllLines(
-            (Join-Path $PWD "dist/SHA256SUMS.txt"),
-            [string[]]$hashLines,
-            [System.Text.UTF8Encoding]::new($false)
-          )
-          Get-Content -LiteralPath "dist/SHA256SUMS.txt"
 
       - name: Upload packaged add-ons
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

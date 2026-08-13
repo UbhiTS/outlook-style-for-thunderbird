@@ -1618,11 +1618,22 @@
 }
 
 /* Accepted invitations and personally-created events retain the solid
- * calendar-colour rail. Awaiting-response and tentative invitations use the
- * diagonal Outlook treatment visible in My Day. Surface-coloured gaps make
- * the pattern adapt cleanly to both the light and dark palettes. */
+ * calendar-colour rail. Tentative invitations use Outlook's diagonal hatch;
+ * unanswered invitations use a hollow calendar-colour rail so their RSVP
+ * states remain distinct without consuming title space. */
 #messengerWindow #agenda
-  .agenda-listitem:is([status="NEEDS-ACTION"], [status="TENTATIVE"])
+  .agenda-listitem[status="NEEDS-ACTION"]
+  .agenda-listitem-calendar {
+  box-sizing: border-box !important;
+  border: 1px solid
+    var(--item-backcolor, var(--outlook-accent)) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  opacity: 1 !important;
+}
+
+#messengerWindow #agenda
+  .agenda-listitem[status="TENTATIVE"]
   .agenda-listitem-calendar {
   box-sizing: border-box !important;
   border: 0 !important;
@@ -1633,14 +1644,7 @@
     var(--outlook-surface) 2px 4px
   ) !important;
   box-shadow: inset 0 0 0 1px var(--item-backcolor) !important;
-}
-
-/* A tentative response remains patterned but is slightly quieter than an
- * invitation that still needs a response. */
-#messengerWindow #agenda
-  .agenda-listitem[status="TENTATIVE"]
-  .agenda-listitem-calendar {
-  opacity: 0.85 !important;
+  opacity: 1 !important;
 }
 
 /* Declined/delegated invitations are not candidates for Up Next. Keep them
@@ -1727,46 +1731,102 @@
   opacity: 1 !important;
 }
 
-/* Thunderbird supplies several countdowns; Outlook shows one Up Next pill. */
+/* Thunderbird supplies several rounded countdowns. The Companion owns one
+ * minute-accurate Up Next marker and leaves the native labels hidden. */
 #messengerWindow #today-pane-panel[data-fluent-myday]
   #agenda .agenda-listitem-relative {
   display: none !important;
 }
 
 #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
-  .agenda-listitem[data-fluent-next-event]:has(.agenda-listitem-relative:not(:empty))
+  .agenda-listitem[data-fluent-time-state]
   .agenda-listitem-details {
   margin-block-start: 43px !important;
 }
 
 #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
-  .agenda-listitem[data-fluent-next-event]
-  .agenda-listitem-relative:not(:empty) {
+  .agenda-listitem[data-fluent-time-state]
+  .fluent-time-marker {
   position: absolute !important;
   inset-block-start: -36px !important;
-  inset-inline-start: 0 !important;
+  inset-inline: 0 !important;
+  z-index: 1 !important;
+  display: flex !important;
+  align-items: center !important;
+  box-sizing: border-box !important;
+  inline-size: auto !important;
+  block-size: 28px !important;
+  pointer-events: none !important;
+}
+
+#messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+  .agenda-listitem[data-fluent-time-state]
+  .fluent-time-marker::before {
+  content: "" !important;
+  position: absolute !important;
+  inset-inline: 0 !important;
+  inset-block-start: 50% !important;
+  border-block-start: 1px solid
+    color-mix(in srgb, var(--outlook-accent) 55%, transparent) !important;
+}
+
+#messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+  .agenda-listitem[data-fluent-time-state]
+  .fluent-time-pill {
+  position: relative !important;
   z-index: 1 !important;
   display: inline-flex !important;
+  flex: none !important;
   align-items: center !important;
-  inline-size: max-content !important;
-  min-block-size: 24px !important;
+  box-sizing: border-box !important;
+  min-block-size: 28px !important;
   border-radius: 14px !important;
   padding: 2px 10px !important;
   background: var(--outlook-primary-fill) !important;
   color: var(--outlook-on-primary) !important;
   font-size: 12px !important;
   line-height: 18px !important;
+  white-space: nowrap !important;
 }
 
 #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
-  .agenda-listitem[data-fluent-next-event]
-  .agenda-listitem-relative:not(:empty)::before {
-  content: "\25F7" !important;
+  .fluent-time-pill-icon {
   margin-inline-end: 5px !important;
   font-size: 14px !important;
 }
 
-#messengerWindow #agenda .agenda-listitem-past .agenda-listitem-details {
+@keyframes fluent-time-pill-alert {
+  0%,
+  100% {
+    filter: brightness(1);
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    filter: brightness(1.12);
+    box-shadow: 0 0 0 5px
+      color-mix(in srgb, var(--outlook-accent) 30%, transparent);
+  }
+}
+
+#messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+  .agenda-listitem[data-fluent-time-attention]
+  .fluent-time-pill {
+  animation: fluent-time-pill-alert 1.4s ease-in-out infinite !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+    .agenda-listitem[data-fluent-time-attention]
+    .fluent-time-pill {
+    animation: none !important;
+    outline: 2px solid var(--outlook-accent) !important;
+    outline-offset: 2px !important;
+  }
+}
+
+#messengerWindow #agenda
+  .agenda-listitem.agenda-listitem-past
+  .agenda-listitem-details {
   opacity: 0.72 !important;
 }
 
@@ -2004,18 +2064,194 @@
   color: var(--outlook-text, #242424) !important;
 }
 
+/* Thunderbird supplies these recipient actions in a vertical XUL box. Make
+ * that box a responsive row: all three actions stay together when space is
+ * available, then wrap naturally without changing command or focus order. */
+:root#abContactsPanel
+  body
+  > hbox:has(> vbox > #toButton) {
+  box-sizing: border-box !important;
+  inline-size: 100% !important;
+  padding: 8px !important;
+}
+
+:root#abContactsPanel
+  body
+  > hbox:has(> vbox > #toButton)
+  > vbox {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  flex-flow: row wrap !important;
+  justify-content: center !important;
+  align-items: center !important;
+  gap: 6px !important;
+  min-inline-size: 0 !important;
+  inline-size: 100% !important;
+}
+
 :root#abContactsPanel :is(#toButton, #ccButton, #bccButton) {
+  flex: 0 0 auto !important;
+  max-inline-size: 100% !important;
   min-block-size: 32px !important;
+  margin: 0 !important;
   border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
   border-radius: var(--fluent-radius-small, 4px) !important;
   background: var(--outlook-surface, #ffffff) !important;
   color: var(--outlook-text, #242424) !important;
   opacity: 1 !important;
+  white-space: normal !important;
 }
 
 :root#abContactsPanel :is(#toButton, #ccButton, #bccButton)[disabled] {
   background: var(--outlook-surface-subtle, #f5f5f5) !important;
   color: var(--outlook-text-muted, #616161) !important;
+}
+
+:root#abContactsPanel
+  :is(#toButton, #ccButton, #bccButton):not([disabled]):hover {
+  background: var(--outlook-surface-subtle, #f5f5f5) !important;
+}
+
+:root#abContactsPanel
+  :is(#toButton, #ccButton, #bccButton):not([disabled]):active {
+  background: var(--outlook-current, #e0e0e0) !important;
+}
+
+/* Full spell-check dialog. This legacy editor window owns its own dialog
+ * variables, so style both the root and the inner dialog explicitly. */
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"],
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] body,
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] dialog {
+  --lwt-accent-color: var(--outlook-surface-subtle, #f5f5f5) !important;
+  --lwt-accent-color-inactive: var(--outlook-surface-alt, #fafafa) !important;
+  --lwt-text-color: var(--outlook-text, #242424) !important;
+  --box-text-color: var(--outlook-text, #242424) !important;
+  --box-background-color: var(--outlook-surface, #ffffff) !important;
+  --box-border-color: var(--outlook-divider-strong, #d1d1d1) !important;
+  --field-text-color: var(--outlook-text, #242424) !important;
+  --field-background-color: var(--outlook-surface, #ffffff) !important;
+  --field-border-color: var(--outlook-divider-strong, #d1d1d1) !important;
+  --field-border-hover-color: var(--outlook-field-hover-border, #a6a6a6) !important;
+  --button-background-color: var(--outlook-surface, #ffffff) !important;
+  --button-hover-background-color: var(--outlook-surface-subtle, #f5f5f5) !important;
+  --button-active-background-color: var(--outlook-current, #e0e0e0) !important;
+  --button-border-color: var(--outlook-divider-strong, #d1d1d1) !important;
+  --button-primary-background-color: var(--outlook-primary-fill, #0f6cbd) !important;
+  --button-primary-hover-background-color: var(--outlook-primary-fill-hover, #115ea3) !important;
+  --button-primary-active-background-color: var(--outlook-primary-fill-pressed, #0c3b5e) !important;
+  --button-primary-text-color: var(--outlook-on-primary, #ffffff) !important;
+  --selected-item-color: var(--outlook-accent, #0f6cbd) !important;
+  --selected-item-text-color: var(--outlook-on-primary, #ffffff) !important;
+  background: var(--outlook-surface-subtle, #f5f5f5) !important;
+  color: var(--outlook-text, #242424) !important;
+  text-shadow: none !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] dialog {
+  box-sizing: border-box !important;
+  min-inline-size: var(--outlook-spell-dialog-min-width, 520px) !important;
+  min-block-size: var(--outlook-spell-dialog-min-height, 360px) !important;
+  padding: 16px !important;
+  gap: 8px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  :is(.grid-three-column-auto-x-auto, .grid-two-column-x-auto) {
+  gap: 8px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  :is(#ReplaceWordInput, #SuggestedList, #dictionary-list) {
+  box-sizing: border-box !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: var(--fluent-radius-small, 4px) !important;
+  background: var(--outlook-surface, #ffffff) !important;
+  color: var(--outlook-text, #242424) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] #ReplaceWordInput {
+  min-block-size: 32px !important;
+  margin: 0 !important;
+  padding-inline: 8px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] #SuggestedList {
+  min-block-size: 132px !important;
+  padding-block: 3px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  #SuggestedList > richlistitem {
+  min-block-size: 28px !important;
+  padding: 4px 8px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  #SuggestedList > richlistitem[selected="true"] {
+  background: var(--outlook-selection, #ebf3fc) !important;
+  color: var(--outlook-text, #242424) !important;
+  outline: 1px solid var(--outlook-accent, #0f6cbd) !important;
+  outline-offset: -1px !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] #dictionary-list {
+  max-block-size: 96px !important;
+  margin: 4px !important;
+  padding: 6px 10px !important;
+  overflow: auto !important;
+  list-style: none !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  :is(label, #MisspelledWord, #dictionary-list) {
+  color: var(--outlook-text, #242424) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] a {
+  color: var(--outlook-accent, #0f6cbd) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"] .spell-check {
+  min-block-size: 32px !important;
+  margin: 3px !important;
+  border-color: var(--outlook-divider-strong, #d1d1d1) !important;
+  background: var(--outlook-surface, #ffffff) !important;
+  color: var(--outlook-text, #242424) !important;
+  opacity: 1 !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check:not([disabled], [default="true"]):hover {
+  background: var(--outlook-surface-subtle, #f5f5f5) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check:not([disabled], [default="true"]):active {
+  background: var(--outlook-current, #e0e0e0) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check[default="true"] {
+  border-color: var(--outlook-primary-fill, #0f6cbd) !important;
+  background: var(--outlook-primary-fill, #0f6cbd) !important;
+  color: var(--outlook-on-primary, #ffffff) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check[default="true"]:not([disabled]):hover {
+  background: var(--outlook-primary-fill-hover, #115ea3) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check[default="true"]:not([disabled]):active {
+  background: var(--outlook-primary-fill-pressed, #0c3b5e) !important;
+}
+
+:root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+  .spell-check[disabled] {
+  background: var(--outlook-disabled-surface, #f0f0f0) !important;
+  color: var(--outlook-disabled-text, #767676) !important;
+  opacity: 1 !important;
 }
 
 /* New Event/New Task editor. The outer dialog and its dynamically-created
@@ -3809,11 +4045,26 @@ tooltip {
   }
 
   #messengerWindow #agenda
-    .agenda-listitem:is([status="NEEDS-ACTION"], [status="TENTATIVE"])
+    .agenda-listitem[status="NEEDS-ACTION"]
     .agenda-listitem-calendar {
+    forced-color-adjust: none !important;
     background: Canvas !important;
-    border: 1px dashed Highlight !important;
+    border: 1px solid Highlight !important;
     box-shadow: none !important;
+    opacity: 1 !important;
+  }
+
+  #messengerWindow #agenda
+    .agenda-listitem[status="TENTATIVE"]
+    .agenda-listitem-calendar {
+    forced-color-adjust: none !important;
+    background: repeating-linear-gradient(
+      135deg,
+      Highlight 0 2px,
+      Canvas 2px 4px
+    ) !important;
+    border: 0 !important;
+    box-shadow: inset 0 0 0 1px Highlight !important;
     opacity: 1 !important;
   }
 
@@ -3871,6 +4122,9 @@ tooltip {
         #FormatToolbar, #messageArea, #messageEditor, #contactsSidebar),
   :root#abContactsPanel,
   :root#abContactsPanel body,
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"],
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"] body,
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"] dialog,
   :root:is(#calendar-event-window, #calendar-task-window)[windowtype="Calendar:EventDialog"],
   :root:is(#calendar-event-window, #calendar-task-window)[windowtype="Calendar:EventDialog"] body,
   :root:is(#calendar-event-dialog-inner, #calendar-task-dialog-inner),
@@ -3890,10 +4144,28 @@ tooltip {
       [aria-current="date"], [aria-pressed="true"], [data-selected="true"]
     ),
   #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
-    .agenda-listitem[data-fluent-next-event]
-    .agenda-listitem-relative:not(:empty) {
+    .agenda-listitem[data-fluent-time-state]
+    .fluent-time-pill {
     background: Highlight !important;
     color: HighlightText !important;
+  }
+
+  #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+    .agenda-listitem[data-fluent-time-state]
+    .fluent-time-marker::before {
+    border-color: Highlight !important;
+  }
+
+  #messengerWindow #today-pane-panel[data-fluent-myday] #agenda
+    .agenda-listitem[data-fluent-time-attention]
+    .fluent-time-pill {
+    forced-color-adjust: none !important;
+    animation: none !important;
+    border: 1px solid HighlightText !important;
+    outline: 2px solid Highlight !important;
+    outline-offset: 2px !important;
+    box-shadow: none !important;
+    filter: none !important;
   }
 
   menupopup > menuitem[_moz-menuactive]:not([disabled]) {
@@ -3926,6 +4198,8 @@ tooltip {
   :root#abContactsPanel
     :is(#addressbookList, #abContextMenuButton, #peopleSearchInput,
         #toButton, #ccButton, #bccButton),
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    :is(#ReplaceWordInput, #SuggestedList, #dictionary-list),
   :root:is(#calendar-event-dialog-inner, #calendar-task-dialog-inner)
     :is(#item-title, #item-location, #item-calendar, #item-categories,
         #item-repeat, #item-alarm, .item-alarm, #todo-status,
@@ -3934,6 +4208,50 @@ tooltip {
     border-color: ButtonBorder !important;
     background: Field !important;
     color: FieldText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    #SuggestedList > richlistitem[selected="true"] {
+    background: Highlight !important;
+    color: HighlightText !important;
+    outline-color: HighlightText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    .spell-check {
+    border-color: ButtonBorder !important;
+    background: ButtonFace !important;
+    color: ButtonText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    .spell-check[default="true"] {
+    border-color: Highlight !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    .spell-check[default="true"]:not([disabled]):is(:hover, :active) {
+    border-color: Highlight !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    .spell-check:not([disabled], [default="true"]):is(:hover, :active) {
+    border-color: ButtonBorder !important;
+    background: ButtonFace !important;
+    color: ButtonText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"]
+    .spell-check[disabled] {
+    color: GrayText !important;
+  }
+
+  :root#spellCheckDlg[data-outlook-style-spell-dialog="true"] a {
+    color: LinkText !important;
   }
 
   :root:is(#calendar-event-window, #calendar-task-window)[windowtype="Calendar:EventDialog"]

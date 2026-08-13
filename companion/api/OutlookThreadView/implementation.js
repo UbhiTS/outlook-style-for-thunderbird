@@ -4,6 +4,9 @@ const { ExtensionSupport } = ChromeUtils.importESModule(
 const { cal } = ChromeUtils.importESModule(
   "resource:///modules/calendar/calUtils.sys.mjs"
 );
+const { CalMetronome } = ChromeUtils.importESModule(
+  "resource:///modules/CalMetronome.sys.mjs"
+);
 const { CalAttendee } = ChromeUtils.importESModule(
   "resource:///modules/CalAttendee.sys.mjs"
 );
@@ -16,7 +19,11 @@ const { MailUtils } = ChromeUtils.importESModule(
 const TODAY_PANE_LISTENER_ID = "fluent-mail-outlook-inspired-today-pane";
 const MAIN_PANE_SCHEME_LISTENER_ID =
   "outlook-style-companion-main-pane-scheme";
+const MESSAGE_DISPLAY_SURFACE_LISTENER_ID =
+  "outlook-style-companion-message-display-surface";
 const MESSENGER_WINDOW_URL = "chrome://messenger/content/messenger.xhtml";
+const MESSAGE_WINDOW_URL =
+  "chrome://messenger/content/messageWindow.xhtml";
 const REMINDER_DIALOG_LISTENER_ID =
   "outlook-style-companion-reminder-dialog";
 const REMINDER_DIALOG_WINDOW_URL =
@@ -25,6 +32,8 @@ const EDITOR_SURFACE_LISTENER_ID =
   "outlook-style-companion-editor-surfaces";
 const COMPOSE_WINDOW_URL =
   "chrome://messenger/content/messengercompose/messengercompose.xhtml";
+const SPELL_CHECK_DIALOG_WINDOW_URL =
+  "chrome://messenger/content/messengercompose/EdSpellCheck.xhtml";
 const EVENT_DIALOG_WINDOW_URL =
   "chrome://calendar/content/calendar-event-dialog.xhtml";
 const EVENT_ATTENDEES_DIALOG_WINDOW_URL =
@@ -35,7 +44,6 @@ const CALENDAR_CHOOSER_LISTENER_ID =
   "outlook-style-companion-calendar-chooser";
 const CALENDAR_CHOOSER_WINDOW_URL =
   "chrome://calendar/content/chooseCalendarDialog.xhtml";
-const EDITOR_SURFACE_STYLE_ID = "outlook-style-editor-surface";
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 const PANE_WIDTHS_PREF =
   "extensions.fluent-mail-outlook-inspired.pane-widths-v106";
@@ -50,8 +58,11 @@ const DEFAULT_ATTENDEES_WINDOW_HEIGHT = 720;
 const CONVERSATION_VIEW_PREF = "mail.thread.conversation.enabled";
 const GLOBAL_INDEXER_PREF = "mailnews.database.global.indexer.enabled";
 const CONVERSATION_VIEW_STYLE_ID = "outlook-style-conversation-view";
+const MESSAGE_DOCUMENT_URI_PATTERN =
+  /^(?:imap|mailbox|news|nntp|snews|file):/i;
 const CONVERSATION_VIEW_LOAD_TIMEOUT_MS = 4000;
 const OWNED_CONVERSATION_ATTRIBUTE = "data-outlook-style-owned-conversation";
+const MSG_VIEW_FLAG_DUMMY = 0x20000000;
 const enhancedTodayPaneWindows = new Set();
 const todayPaneState = new WeakMap();
 let todayPaneListenerRegistered = false;
@@ -64,13 +75,104 @@ let editorSurfaceListenerRegistered = false;
 const enhancedMainPaneSchemeWindows = new Set();
 const mainPaneSchemeState = new WeakMap();
 let mainPaneSchemeListenerRegistered = false;
+const enhancedMessageDisplayWindows = new Set();
+const messageDisplayWindowState = new WeakMap();
+const messageDisplayDocumentStyles = new WeakMap();
+let messageDisplaySurfaceListenerRegistered = false;
 const enhancedCalendarChooserWindows = new Set();
 const calendarChooserState = new WeakMap();
 let calendarChooserListenerRegistered = false;
 const guardedConversationViews = new Set();
 const conversationGuardState = new WeakMap();
+const conversationSelectionCapturePanes = new Set();
+const conversationSelectionCaptureState = new WeakMap();
 
 const OUTLOOK_COLOR_SCHEME_ATTRIBUTE = "data-outlook-color-scheme";
+
+function runEnhancementStep(description, callback) {
+  try {
+    return callback();
+  } catch (error) {
+    console.error(
+      `Outlook Style Companion could not install ${description}:`,
+      error
+    );
+    return false;
+  }
+}
+
+function enhanceWindowSafely(description, window, enhance, rollback) {
+  try {
+    return enhance(window);
+  } catch (error) {
+    console.error(
+      `Outlook Style Companion could not enhance ${description}:`,
+      error
+    );
+    if (rollback) {
+      try {
+        rollback(window);
+      } catch (cleanupError) {
+        console.error(
+          `Outlook Style Companion could not roll back ${description}:`,
+          cleanupError
+        );
+      }
+    }
+    return false;
+  }
+}
+
+function getMessageDisplayCss(scheme, preserveBodyCanvas) {
+  const colors =
+    scheme === "dark"
+      ? {
+          link: "#62abf5",
+          linkVisited: "#96c6fa",
+          surface: "#292929",
+          text: "#ffffff",
+        }
+      : {
+          link: "#0f6cbd",
+          linkVisited: "#115ea3",
+          surface: "#ffffff",
+          text: "#242424",
+        };
+  const background = preserveBodyCanvas
+    ? "transparent"
+    : "var(--outlook-message-surface)";
+  return `
+  :root {
+    --outlook-message-surface: ${colors.surface};
+    --outlook-message-text: ${colors.text};
+    --outlook-message-link: ${colors.link};
+    --outlook-message-link-visited: ${colors.linkVisited};
+    color-scheme: ${scheme};
+    background-color: ${background};
+    color: var(--outlook-message-text);
+  }
+
+  :where(a:link) {
+    color: var(--outlook-message-link);
+  }
+
+  :where(a:visited) {
+    color: var(--outlook-message-link-visited);
+  }
+
+  @media (forced-colors: active) {
+    :root {
+      background-color: Canvas;
+      color: CanvasText;
+    }
+
+    :where(a:link),
+    :where(a:visited) {
+      color: LinkText;
+    }
+  }
+`;
+}
 
 const CONVERSATION_VIEW_CSS = `
   :host {
@@ -223,28 +325,512 @@ function getOutlookColorScheme(window) {
     : "light";
 }
 
+function isAboutMessageWindow(window) {
+  try {
+    return (
+      window?.document?.defaultView === window &&
+      window.document.documentURI === "about:message"
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+function getDisplayedMimeDocument(aboutMessageWindow) {
+  if (!isAboutMessageWindow(aboutMessageWindow)) {
+    return null;
+  }
+  try {
+    const messageBrowser =
+      aboutMessageWindow.document.getElementById("messagepane");
+    const document = messageBrowser?.contentDocument;
+    if (
+      !document?.documentElement ||
+      messageBrowser.contentDocument !== document ||
+      !MESSAGE_DOCUMENT_URI_PATTERN.test(document.documentURI || "")
+    ) {
+      return null;
+    }
+    return document;
+  } catch (error) {
+    /* The MIME browser can change remoteness while a message is replaced. */
+    return null;
+  }
+}
+
+function removeDisplayedMimeDocumentStyle(document) {
+  const record = messageDisplayDocumentStyles.get(document);
+  if (!record) {
+    return;
+  }
+  try {
+    document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+      candidate => candidate !== record.styleSheet
+    );
+  } catch (error) {
+    /* A detached message document may already have been destroyed. */
+  }
+  messageDisplayDocumentStyles.delete(document);
+}
+
+function ensureDisplayedMimeDocumentStyle(document, scheme) {
+  const root = document?.documentElement;
+  if (
+    !root ||
+    !MESSAGE_DOCUMENT_URI_PATTERN.test(document.documentURI || "") ||
+    (scheme !== "light" && scheme !== "dark") ||
+    typeof document.defaultView?.CSSStyleSheet !== "function" ||
+    !("adoptedStyleSheets" in document)
+  ) {
+    return null;
+  }
+
+  let record = messageDisplayDocumentStyles.get(document);
+  if (record && record.root !== root) {
+    removeDisplayedMimeDocumentStyle(document);
+    record = null;
+  }
+  if (!record) {
+    let styleSheet;
+    try {
+      styleSheet = new document.defaultView.CSSStyleSheet();
+      document.adoptedStyleSheets = [
+        ...document.adoptedStyleSheets,
+        styleSheet,
+      ];
+    } catch (error) {
+      /* Fail closed if a MIME document rejects non-DOM style sheets. */
+      return null;
+    }
+    record = {
+      bodyChecked: false,
+      preserveBodyCanvas: false,
+      root,
+      scheme,
+      styleSheet,
+    };
+    messageDisplayDocumentStyles.set(document, record);
+  }
+  record.scheme = scheme;
+  try {
+    record.styleSheet.replaceSync(
+      getMessageDisplayCss(record.scheme, record.preserveBodyCanvas)
+    );
+  } catch (error) {
+    removeDisplayedMimeDocumentStyle(document);
+    return null;
+  }
+  return record;
+}
+
+function finalizeDisplayedMimeDocumentStyle(document, record) {
+  if (!record || record.bodyChecked) {
+    return;
+  }
+  const body = document?.body;
+  if (!body || record.root !== document.documentElement) {
+    return;
+  }
+  try {
+    const bodyStyle = document.defaultView.getComputedStyle(body);
+    const backgroundColor = bodyStyle.backgroundColor
+      .replaceAll(" ", "")
+      .toLowerCase();
+    const hasOpaqueBackground =
+      backgroundColor !== "transparent" &&
+      backgroundColor !== "rgba(0,0,0,0)";
+    const hasBackgroundImage = bodyStyle.backgroundImage !== "none";
+    record.preserveBodyCanvas = hasOpaqueBackground || hasBackgroundImage;
+    record.styleSheet.replaceSync(
+      getMessageDisplayCss(record.scheme, record.preserveBodyCanvas)
+    );
+    record.bodyChecked = true;
+  } catch (error) {
+    /* A document replaced during MsgLoaded will be handled by its own event. */
+  }
+}
+
+function styleAboutMessageWindow(aboutMessageWindow, scheme, finalize) {
+  const document = getDisplayedMimeDocument(aboutMessageWindow);
+  if (!document) {
+    return;
+  }
+  const record = ensureDisplayedMimeDocumentStyle(document, scheme);
+  if (finalize) {
+    finalizeDisplayedMimeDocumentStyle(document, record);
+  }
+}
+
+function forEachAboutMessageWindow(window, callback) {
+  let browsingContexts = [];
+  try {
+    browsingContexts =
+      window.browsingContext?.getAllBrowsingContextsInSubtree() || [];
+  } catch (error) {
+    return;
+  }
+  for (const browsingContext of browsingContexts) {
+    try {
+      if (browsingContext.currentURI?.spec === "about:message") {
+        callback(browsingContext.window);
+      }
+    } catch (error) {
+      /* A tab or conversation browser can detach during the traversal. */
+    }
+  }
+}
+
+function syncDisplayedMimeDocuments(window) {
+  if (window.closed) {
+    return;
+  }
+  const scheme = getOutlookColorScheme(window);
+  forEachAboutMessageWindow(window, aboutMessageWindow => {
+    let finalize = false;
+    try {
+      finalize =
+        aboutMessageWindow.msgLoaded === true &&
+        aboutMessageWindow.msgLoading !== true;
+    } catch (error) {
+      /* A reader can detach between traversal and state inspection. */
+    }
+    styleAboutMessageWindow(aboutMessageWindow, scheme, finalize);
+  });
+}
+
+function installMessageDisplaySurfaceBridge(window) {
+  if (messageDisplayWindowState.has(window)) {
+    return true;
+  }
+  const url = window.document?.location?.href;
+  if (url !== MESSENGER_WINDOW_URL && url !== MESSAGE_WINDOW_URL) {
+    return false;
+  }
+
+  const state = {
+    schemeFrame: 0,
+    shuttingDown: false,
+  };
+  const onMsgLoading = event => {
+    if (state.shuttingDown || !isAboutMessageWindow(event.target)) {
+      return;
+    }
+    /* MsgLoading identifies the exact about:message reader synchronously.
+     * Styling its current MIME document directly avoids resolving a tab after
+     * a conversation browser has already been replaced or detached. */
+    styleAboutMessageWindow(
+      event.target,
+      getOutlookColorScheme(window),
+      false
+    );
+  };
+  const onMsgLoaded = event => {
+    if (state.shuttingDown || !isAboutMessageWindow(event.target)) {
+      return;
+    }
+    /* Capture before about:message's target listener can adapt the MIME body
+     * for dark mode. Authored-canvas detection must inspect the original
+     * message, not colors introduced by Thunderbird's DarkReader. */
+    styleAboutMessageWindow(
+      event.target,
+      getOutlookColorScheme(window),
+      true
+    );
+  };
+  const syncScheme = () => {
+    state.schemeFrame = 0;
+    if (!state.shuttingDown) {
+      syncDisplayedMimeDocuments(window);
+    }
+  };
+  const scheduleSchemeSync = () => {
+    if (window.closed || state.shuttingDown || state.schemeFrame) {
+      return;
+    }
+    state.schemeFrame = window.requestAnimationFrame(syncScheme);
+  };
+
+  const systemScheme = window.matchMedia("(prefers-color-scheme: dark)");
+  const schemeObserver = new window.MutationObserver(scheduleSchemeSync);
+  Object.assign(state, {
+    onMsgLoaded,
+    onMsgLoading,
+    scheduleSchemeSync,
+    schemeObserver,
+    systemScheme,
+  });
+  messageDisplayWindowState.set(window, state);
+  enhancedMessageDisplayWindows.add(window);
+
+  schemeObserver.observe(window.document.documentElement, {
+    attributes: true,
+    attributeFilter: [
+      OUTLOOK_COLOR_SCHEME_ATTRIBUTE,
+      "class",
+      "lwt-sidebar",
+      "style",
+    ],
+  });
+  window.addEventListener("MsgLoading", onMsgLoading, true);
+  window.addEventListener("MsgLoaded", onMsgLoaded, true);
+  window.addEventListener("windowlwthemeupdate", scheduleSchemeSync);
+  systemScheme.addEventListener("change", scheduleSchemeSync);
+  syncDisplayedMimeDocuments(window);
+  return true;
+}
+
+function removeMessageDisplaySurfaceBridge(window) {
+  const state = messageDisplayWindowState.get(window);
+  if (!state) {
+    return;
+  }
+  state.shuttingDown = true;
+  window.removeEventListener("MsgLoading", state.onMsgLoading, true);
+  window.removeEventListener("MsgLoaded", state.onMsgLoaded, true);
+  window.removeEventListener(
+    "windowlwthemeupdate",
+    state.scheduleSchemeSync
+  );
+  state.systemScheme.removeEventListener("change", state.scheduleSchemeSync);
+  state.schemeObserver.disconnect();
+  if (state.schemeFrame) {
+    window.cancelAnimationFrame(state.schemeFrame);
+  }
+  forEachAboutMessageWindow(window, aboutMessageWindow => {
+    const document = getDisplayedMimeDocument(aboutMessageWindow);
+    if (document) {
+      removeDisplayedMimeDocumentStyle(document);
+    }
+  });
+  messageDisplayWindowState.delete(window);
+  enhancedMessageDisplayWindows.delete(window);
+}
+
+function installMessageDisplaySurfaceEnhancement() {
+  if (messageDisplaySurfaceListenerRegistered) {
+    return true;
+  }
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "a message display window",
+      window,
+      installMessageDisplaySurfaceBridge,
+      removeMessageDisplaySurfaceBridge
+    );
+  ExtensionSupport.registerWindowListener(
+    MESSAGE_DISPLAY_SURFACE_LISTENER_ID,
+    {
+      chromeURLs: [MESSENGER_WINDOW_URL, MESSAGE_WINDOW_URL],
+      onLoadWindow: enhanceWindow,
+      onUnloadWindow: removeMessageDisplaySurfaceBridge,
+    }
+  );
+  messageDisplaySurfaceListenerRegistered = true;
+
+  const windows = Services.wm.getEnumerator(null);
+  while (windows.hasMoreElements()) {
+    enhanceWindow(windows.getNext());
+  }
+  return true;
+}
+
 function sameMessage(left, right) {
+  try {
+    const leftHeader = left?.folderMessage || left;
+    const rightHeader = right?.folderMessage || right;
+    const leftKey = leftHeader?.messageKey;
+    const rightKey = rightHeader?.messageKey;
+    const leftFolder = String(leftHeader?.folder?.URI || "").trim();
+    const rightFolder = String(rightHeader?.folder?.URI || "").trim();
+    return Boolean(
+      leftHeader &&
+        rightHeader &&
+        Number.isInteger(leftKey) &&
+        Number.isInteger(rightKey) &&
+        leftKey >= 0 &&
+        rightKey >= 0 &&
+        leftKey !== 0xffffffff &&
+        rightKey !== 0xffffffff &&
+        leftFolder &&
+        rightFolder &&
+        leftKey === rightKey &&
+        leftFolder === rightFolder
+    );
+  } catch (error) {
+    /* A Gloda result can lose its backing folder header during teardown. */
+    return false;
+  }
+}
+
+function getMessageId(message) {
+  try {
+    return String(
+      message?.folderMessage?.messageId || message?.messageId || ""
+    ).trim();
+  } catch (error) {
+    return "";
+  }
+}
+
+function getNativeMessageIdentity(message) {
+  try {
+    const header = message?.folderMessage || message;
+    const key = header?.messageKey;
+    const folder = String(header?.folder?.URI || "").trim();
+    if (
+      !header ||
+      !Number.isInteger(key) ||
+      key < 0 ||
+      key === 0xffffffff ||
+      !folder
+    ) {
+      return "";
+    }
+    return `${folder.length}:${folder}:${key}`;
+  } catch (error) {
+    return "";
+  }
+}
+
+function hasUniqueMessageIds(messages) {
+  const ids = messages.map(getMessageId);
+  return Boolean(
+    ids.length && ids.every(Boolean) && new Set(ids).size === ids.length
+  );
+}
+
+function sameCrossFolderCopy(left, right) {
+  try {
+    const leftHeader = left?.folderMessage || left;
+    const rightHeader = right?.folderMessage || right;
+    return Boolean(
+      getMessageId(leftHeader) &&
+        getMessageId(leftHeader) === getMessageId(rightHeader) &&
+        Number(leftHeader?.dateInSeconds) ===
+          Number(rightHeader?.dateInSeconds) &&
+        String(leftHeader?.author || "") ===
+          String(rightHeader?.author || "") &&
+        String(leftHeader?.subject || "") ===
+          String(rightHeader?.subject || "") &&
+        Number(leftHeader?.messageSize) === Number(rightHeader?.messageSize)
+    );
+  } catch (error) {
+    /* A cross-folder Gloda wrapper can lose its backing header mid-query. */
+    return false;
+  }
+}
+
+/**
+ * Match every visible thread header to exactly one Gloda conversation result.
+ * Prefer Thunderbird's native folder/message-key identity. A Message-ID is
+ * used only for a unique cross-folder copy (for example Gmail All Mail), never
+ * as an unqualified or duplicate identity.
+ */
+function matchConversationMessages(loadedMessages, expectedMessages) {
+  if (
+    !hasUniqueMessageIds(loadedMessages) ||
+    !hasUniqueMessageIds(expectedMessages)
+  ) {
+    return null;
+  }
+
+  const loadedByNativeIdentity = new Map();
+  const loadedByMessageId = new Map();
+  for (const loaded of loadedMessages) {
+    const nativeIdentity = getNativeMessageIdentity(loaded);
+    if (nativeIdentity) {
+      const candidates = loadedByNativeIdentity.get(nativeIdentity) || [];
+      candidates.push(loaded);
+      loadedByNativeIdentity.set(nativeIdentity, candidates);
+    }
+    const messageId = getMessageId(loaded);
+    const messageIdCandidates = loadedByMessageId.get(messageId) || [];
+    messageIdCandidates.push(loaded);
+    loadedByMessageId.set(messageId, messageIdCandidates);
+  }
+
+  const matches = new Map();
+  const usedLoadedMessages = new Set();
+  for (const expected of expectedMessages) {
+    const nativeCandidates = (
+      loadedByNativeIdentity.get(getNativeMessageIdentity(expected)) || []
+    ).filter(message => !usedLoadedMessages.has(message));
+    let candidate = null;
+    if (nativeCandidates.length === 1) {
+      candidate = nativeCandidates[0];
+    } else if (!nativeCandidates.length) {
+      const crossFolderCandidates = (
+        loadedByMessageId.get(getMessageId(expected)) || []
+      ).filter(message => !usedLoadedMessages.has(message));
+      const crossFolderCandidate =
+        crossFolderCandidates.length === 1
+          ? crossFolderCandidates[0]
+          : null;
+      if (
+        crossFolderCandidate &&
+        sameCrossFolderCopy(crossFolderCandidate, expected)
+      ) {
+        candidate = crossFolderCandidate;
+      }
+    }
+    if (!candidate) {
+      return null;
+    }
+    matches.set(expected, candidate);
+    usedLoadedMessages.add(candidate);
+  }
+  return matches;
+}
+
+function isExpandedSelectedRoot(
+  dbView,
+  selectedIndex,
+  selectedMessage,
+  rootMessage
+) {
   return (
-    left?.messageKey === right?.messageKey &&
-    left?.folder?.URI === right?.folder?.URI
+    sameMessage(selectedMessage, rootMessage) &&
+    dbView.isContainer(selectedIndex) &&
+    dbView.isContainerOpen(selectedIndex)
   );
 }
 
 function isExpectedConversationSelection(state) {
-  const { about3Pane, conversationView, messagePane, rootMessage } = state;
+  const {
+    about3Pane,
+    conversationView,
+    dbView: expectedDbView,
+    messagePane,
+    rootMessage,
+    selectedMessage,
+    selectedRootOpen,
+  } = state;
   try {
     const dbView = about3Pane.gDBView;
     const threadTree = about3Pane.threadTree;
     const selectedIndex = threadTree?.selectedIndex ?? -1;
+    const currentThread =
+      selectedIndex >= 0
+        ? dbView?.getThreadContainingIndex(selectedIndex)
+        : null;
     return (
       !about3Pane.closed &&
+      dbView === expectedDbView &&
+      about3Pane.gViewWrapper?.showThreaded &&
       conversationView.isConnected &&
       messagePane.querySelector(":scope > conversation-view") ===
         conversationView &&
       selectedIndex >= 0 &&
       dbView?.selection?.count === 1 &&
-      dbView.numSelected === 1 &&
-      sameMessage(dbView.getMsgHdrAt(selectedIndex), rootMessage)
+      threadTree.selectedIndices?.length === 1 &&
+      sameMessage(dbView.getMsgHdrAt(selectedIndex), selectedMessage) &&
+      sameMessage(currentThread?.getRootHdr(), rootMessage) &&
+      isExpandedSelectedRoot(
+        dbView,
+        selectedIndex,
+        dbView.getMsgHdrAt(selectedIndex),
+        currentThread?.getRootHdr()
+      ) === selectedRootOpen
     );
   } catch (error) {
     return false;
@@ -256,6 +842,9 @@ function removeConversationGuard(conversationView) {
   if (state?.timeoutId) {
     state.about3Pane.clearTimeout(state.timeoutId);
   }
+  if (state?.onBrowserLoad) {
+    state.main.removeEventListener("load", state.onBrowserLoad, true);
+  }
   state?.observer.disconnect();
   conversationGuardState.delete(conversationView);
   guardedConversationViews.delete(conversationView);
@@ -266,15 +855,221 @@ function retireConversationView(messagePane, conversationView) {
     return;
   }
   conversationView.hidden = true;
-  try {
-    conversationView.clear();
-  } catch (error) {
-    /* A retiring native host may be between asynchronous lifecycle callbacks. */
+  /* Detach the host from MessagePane before removing it. Thunderbird's own
+   * selection cleanup may run immediately afterward; leaving this reference
+   * live makes it call clear() on an already-disconnected about:message
+   * browser whose displayMessage function is no longer available. */
+  if (messagePane?.conversationView === conversationView) {
+    messagePane.conversationView = null;
   }
   removeConversationGuard(conversationView);
   conversationView.remove();
-  if (messagePane?.conversationView === conversationView) {
-    messagePane.conversationView = null;
+}
+
+function removeConversationSelectionCapture(about3Pane) {
+  const state = conversationSelectionCaptureState.get(about3Pane);
+  if (!state) {
+    return;
+  }
+  state.threadTree.removeEventListener("select", state.onSelect, true);
+  about3Pane.removeEventListener("unload", state.onUnload);
+  if (state.refreshTimer) {
+    about3Pane.clearTimeout(state.refreshTimer);
+  }
+  conversationSelectionCaptureState.delete(about3Pane);
+  conversationSelectionCapturePanes.delete(about3Pane);
+}
+
+function retireConversationGuardsForPane(about3Pane) {
+  for (const conversationView of [...guardedConversationViews]) {
+    const state = conversationGuardState.get(conversationView);
+    if (state?.about3Pane === about3Pane) {
+      /* The pane is unloading, so remove its observers and timers without
+       * trying to recreate a native reader inside the closing document. */
+      retireConversationView(state.messagePane, conversationView);
+    }
+  }
+}
+
+function installConversationSelectionCapture(about3Pane, refreshConversation) {
+  const threadTree = about3Pane?.threadTree;
+  if (!threadTree || about3Pane.closed) {
+    return false;
+  }
+  const previous = conversationSelectionCaptureState.get(about3Pane);
+  if (previous?.threadTree === threadTree) {
+    if (typeof refreshConversation === "function") {
+      previous.refreshConversation = refreshConversation;
+    }
+    return true;
+  }
+  removeConversationSelectionCapture(about3Pane);
+
+  let state = null;
+  const scheduleRefresh = () => {
+    if (!state || about3Pane.closed) {
+      return;
+    }
+    if (state.refreshTimer) {
+      about3Pane.clearTimeout(state.refreshTimer);
+    }
+    state.refreshTimer = about3Pane.setTimeout(() => {
+      state.refreshTimer = 0;
+      Promise.resolve(state.refreshConversation?.()).catch(error => {
+        console.error(
+          "Outlook Style Companion could not refresh the selected thread:",
+          error
+        );
+      });
+    }, 0);
+  };
+
+  /* Thunderbird clears the previous reader synchronously in its own bubble
+   * listener. A newly-cloned conversation browser is briefly about:blank and
+   * does not yet expose displayMessage(), so clear() can throw during rapid
+   * row changes. Detach an unsafe host in capture phase, before native selection
+   * handling; Thunderbird then renders the stock selection and the Companion
+   * replaces it with the next guarded conversation afterward. */
+  const onSelect = () => {
+    const messagePane = about3Pane.document.querySelector("message-pane");
+    const conversationView = messagePane?.querySelector(
+      ":scope > conversation-view"
+    );
+    if (conversationView) {
+      let shouldRetire =
+        conversationView.getAttribute(OWNED_CONVERSATION_ATTRIBUTE) === "true";
+      if (!shouldRetire) {
+        const browser = conversationView.shadowRoot?.querySelector(
+          'browser[src="about:message"]'
+        );
+        if (!browser) {
+          /* The native Gloda query has not completed. Reusing this host would
+           * let its uncancelled result overwrite the next selection. */
+          shouldRetire = true;
+        } else {
+          try {
+            /* Also cover the short pre-ownership interval when the user enabled
+             * Thunderbird's native conversation pref. A cloned about:blank
+             * browser exists then, but its about:message API is not loaded yet. */
+            const expandedArticle = browser.closest(
+              'article[aria-expanded="true"]'
+            );
+            const expandedMessageId = expandedArticle?.dataset?.messageId || "";
+            const loadedLatestMessageId =
+              conversationView.messages?.at(-1)?.messageId || "";
+            shouldRetire =
+              typeof browser.contentWindow?.displayMessage !== "function" ||
+              browser.hidden ||
+              !expandedArticle ||
+              !expandedMessageId ||
+              (loadedLatestMessageId &&
+                loadedLatestMessageId !== expandedMessageId);
+          } catch (error) {
+            shouldRetire = true;
+          }
+        }
+      }
+      if (shouldRetire) {
+        retireConversationView(messagePane, conversationView);
+      }
+    }
+    /* Run after Thunderbird's bubble-phase selection handler has rendered its
+     * stock reader. This privileged trigger also covers expand/collapse, where
+     * the selected header does not change and the public mailTabs event can
+     * fail before reaching the extension. */
+    scheduleRefresh();
+  };
+  const onUnload = () => {
+    retireConversationGuardsForPane(about3Pane);
+    removeConversationSelectionCapture(about3Pane);
+  };
+  threadTree.addEventListener("select", onSelect, true);
+  about3Pane.addEventListener("unload", onUnload, { once: true });
+  state = {
+    onSelect,
+    onUnload,
+    refreshConversation,
+    refreshTimer: 0,
+    threadTree,
+  };
+  conversationSelectionCaptureState.set(about3Pane, state);
+  conversationSelectionCapturePanes.add(about3Pane);
+  return true;
+}
+
+function restoreCurrentNativeSelection(about3Pane, messagePane) {
+  try {
+    const dbView = about3Pane?.gDBView;
+    if (about3Pane?.closed || !dbView || !messagePane?.isConnected) {
+      return;
+    }
+    const selectedIndex = about3Pane.threadTree?.selectedIndex ?? -1;
+    if (selectedIndex < 0 || dbView.selection?.count === 0) {
+      messagePane.displayMessage();
+      return;
+    }
+    if (dbView.getFlagsAt(selectedIndex) & MSG_VIEW_FLAG_DUMMY) {
+      messagePane.displayMessage();
+      return;
+    }
+    if (dbView.numSelected === 1) {
+      const selected = dbView.getMsgHdrAt(selectedIndex);
+      messagePane.displayMessage(selected.folder.getUriForMsg(selected));
+      return;
+    }
+    messagePane.displayMessages(dbView.getSelectedMsgHdrs());
+  } catch (error) {
+    /* The view can be replaced while a folder or tab is closing. */
+  }
+}
+
+function restoreNativeConversationSelection(state) {
+  if (state.about3Pane.gDBView !== state.dbView) {
+    return;
+  }
+  restoreCurrentNativeSelection(state.about3Pane, state.messagePane);
+}
+
+function displayGuardFallbackMessage(state) {
+  const {
+    about3Pane,
+    dbView,
+    fallbackMessage,
+    messagePane,
+    rootMessage,
+    selectedMessage,
+    selectedRootOpen,
+  } = state;
+  try {
+    const threadTree = about3Pane.threadTree;
+    const selectedIndex = threadTree?.selectedIndex ?? -1;
+    const currentThread =
+      selectedIndex >= 0
+        ? dbView.getThreadContainingIndex(selectedIndex)
+        : null;
+    if (
+      about3Pane.closed ||
+      about3Pane.gDBView !== dbView ||
+      !messagePane?.isConnected ||
+      !about3Pane.gViewWrapper?.showThreaded ||
+      selectedIndex < 0 ||
+      dbView.selection?.count !== 1 ||
+      threadTree.selectedIndices?.length !== 1 ||
+      !sameMessage(dbView.getMsgHdrAt(selectedIndex), selectedMessage) ||
+      !sameMessage(currentThread?.getRootHdr(), rootMessage) ||
+      isExpandedSelectedRoot(
+        dbView,
+        selectedIndex,
+        dbView.getMsgHdrAt(selectedIndex),
+        currentThread?.getRootHdr()
+      ) !== selectedRootOpen
+    ) {
+      return;
+    }
+    const message = fallbackMessage || selectedMessage;
+    messagePane.displayMessage(message.folder.getUriForMsg(message));
+  } catch (error) {
+    /* A selection, folder, or tab can disappear during asynchronous recovery. */
   }
 }
 
@@ -284,14 +1079,202 @@ function retireGuardedConversationWithFallback(conversationView) {
     return;
   }
   const shouldRestore = isExpectedConversationSelection(state);
-  const { messagePane, rootMessage } = state;
+  const { messagePane } = state;
   retireConversationView(messagePane, conversationView);
-  if (shouldRestore && rootMessage) {
-    try {
-      messagePane.displayMessage(rootMessage.folder.getUriForMsg(rootMessage));
-    } catch (error) {
-      /* The containing mail window may be closing at the same time. */
+  if (shouldRestore) {
+    restoreNativeConversationSelection(state);
+  }
+}
+
+function armConversationGuardTimeout(state) {
+  if (state.timeoutId) {
+    state.about3Pane.clearTimeout(state.timeoutId);
+  }
+  state.timeoutId = state.about3Pane.setTimeout(() => {
+    state.timeoutId = 0;
+    if (
+      state.disabled ||
+      state.ready ||
+      !state.conversationView.hidden
+    ) {
+      return;
     }
+    const shouldFallback = isExpectedConversationSelection(state);
+    state.disabled = true;
+    retireConversationView(state.messagePane, state.conversationView);
+    if (shouldFallback) {
+      displayGuardFallbackMessage(state);
+    }
+  }, CONVERSATION_VIEW_LOAD_TIMEOUT_MS);
+}
+
+function failGuardedConversation(state, conversationView) {
+  if (state.timeoutId) {
+    state.about3Pane.clearTimeout(state.timeoutId);
+    state.timeoutId = 0;
+  }
+  state.disabled = true;
+  retireConversationView(state.messagePane, conversationView);
+  displayGuardFallbackMessage(state);
+}
+
+function revealGuardedConversation(state, conversationView) {
+  if (state.timeoutId) {
+    state.about3Pane.clearTimeout(state.timeoutId);
+    state.timeoutId = 0;
+  }
+  if (state.onBrowserLoad) {
+    state.main.removeEventListener("load", state.onBrowserLoad, true);
+    state.onBrowserLoad = null;
+  }
+  /* A collapsed thread may have rendered Thunderbird's legacy snippet
+   * summary before the extension event crossed into this privileged API.
+   * Remove that reader before showing the verified full conversation. */
+  try {
+    state.messagePane.multiMessageBrowser.contentWindow.gMessageSummary?.clear();
+    state.messagePane.multiMessageBrowser.hidden = true;
+  } catch (error) {
+    /* The legacy browser can disappear while the mail tab is closing. */
+  }
+  state.ready = true;
+  conversationView.hidden = false;
+}
+
+/**
+ * Thunderbird 153 initially opens the newest conversation message from a
+ * target-level `load` listener on a freshly inserted about:message browser.
+ * When another visible thread row is selected, intercept that listener in the
+ * ancestor capture phase and use Thunderbird's own compact-row click handler
+ * to create the selected message's browser instead. This prevents the hidden
+ * provisional newest message from being requested (and potentially marked
+ * read) while preserving the native conversation accordion.
+ *
+ * @param {HTMLElement} conversationView
+ * @param {Event} event
+ */
+function interceptInitialConversationBrowserLoad(conversationView, event) {
+  const state = conversationGuardState.get(conversationView);
+  if (
+    !state ||
+    state.disabled ||
+    state.ready ||
+    state.activationStarted ||
+    !state.targetMessage
+  ) {
+    return;
+  }
+
+  const browser =
+    event
+      .composedPath?.()
+      .find(
+        node =>
+          node?.matches?.('browser[src="about:message"]') &&
+          state.main.contains(node)
+      ) || event.target;
+  if (
+    !browser?.matches?.('browser[src="about:message"]') ||
+    !state.main.contains(browser)
+  ) {
+    return;
+  }
+
+  const stopInitialLoad = () => {
+    /* The native listener is registered on the browser itself. Stopping at the
+     * main-conversation ancestor prevents only that provisional display call;
+     * the replacement browser receives its own independent load event. */
+    event.stopImmediatePropagation();
+  };
+  const failClosed = () => {
+    stopInitialLoad();
+    failGuardedConversation(state, conversationView);
+  };
+
+  try {
+    if (!isExpectedConversationSelection(state)) {
+      failClosed();
+      return;
+    }
+
+    const loadedMessages = Array.isArray(conversationView.messages)
+      ? conversationView.messages
+      : [];
+    const matchedMessages = matchConversationMessages(
+      loadedMessages,
+      state.expectedMessages
+    );
+    const loadedLatest = loadedMessages.at(-1);
+    const loadedTarget = matchedMessages
+      ? [...matchedMessages].find(([expected]) =>
+          sameMessage(expected, state.targetMessage)
+        )?.[1]
+      : null;
+    if (!matchedMessages || !loadedLatest || !loadedTarget) {
+      failClosed();
+      return;
+    }
+
+    /* The selected row is already Thunderbird's newest-first default. Allow
+     * its native target listener to load it normally. */
+    if (loadedTarget === loadedLatest) {
+      return;
+    }
+
+    const expandedArticle = browser.closest('article[aria-expanded="true"]');
+    const latestMessageId = getMessageId(loadedLatest);
+    const targetMessageId = getMessageId(loadedTarget);
+    const targetArticle = [
+      ...state.main.querySelectorAll('article[aria-expanded="false"]'),
+    ].find(
+      article =>
+        String(article.dataset.messageId || "").trim() === targetMessageId
+    );
+    if (
+      !expandedArticle ||
+      !latestMessageId ||
+      !targetMessageId ||
+      !targetArticle
+    ) {
+      failClosed();
+      return;
+    }
+
+    /* TB153 interpolates the Message-ID into a private selector. Exercise that
+     * exact lookup before dispatching the click so malformed IDs fail safely. */
+    const nativeTargetArticle = state.main.querySelector(
+      `article[data-message-id="${targetMessageId}"]`
+    );
+    if (nativeTargetArticle !== targetArticle) {
+      failClosed();
+      return;
+    }
+
+    stopInitialLoad();
+    /* #openMessage expects the current full article to identify the message it
+     * is collapsing. Normally MsgLoaded adds this attribute, but that is
+     * exactly the provisional load being skipped. The browser is made
+     * non-hidden only so the companion's click-safety capture listener permits
+     * the native click; the host stays hidden until the target is verified. */
+    expandedArticle.dataset.messageId = latestMessageId;
+    browser.hidden = false;
+    state.activationStarted = true;
+    state.targetMessageId = targetMessageId;
+    state.loadedTarget = loadedTarget;
+    armConversationGuardTimeout(state);
+    targetArticle.click();
+  } catch (error) {
+    failClosed();
+    return;
+  }
+  try {
+    const targetArticle = state.main.querySelector(
+      `article[data-message-id="${state.targetMessageId}"][aria-expanded="false"]`
+    );
+    if (targetArticle) {
+      failClosed();
+    }
+  } catch (error) {
+    failClosed();
   }
 }
 
@@ -301,13 +1284,26 @@ function validateGuardedConversation(conversationView) {
     return;
   }
 
-  /* If the user independently enables Thunderbird's native conversation
-   * feature, immediately relinquish this host instead of applying an old
-   * Companion expectation to a native selection that may reuse it. */
-  if (state.userConversationViewEnabled) {
-    conversationView.removeAttribute(OWNED_CONVERSATION_ATTRIBUTE);
-    conversationView.hidden = false;
-    removeConversationGuard(conversationView);
+  if (state.disabled) {
+    if (state.timeoutId) {
+      state.about3Pane.clearTimeout(state.timeoutId);
+      state.timeoutId = 0;
+    }
+    retireConversationView(state.messagePane, conversationView);
+    return;
+  }
+
+  if (!isExpectedConversationSelection(state)) {
+    if (state.timeoutId) {
+      state.about3Pane.clearTimeout(state.timeoutId);
+      state.timeoutId = 0;
+    }
+    state.disabled = true;
+    retireConversationView(state.messagePane, conversationView);
+    /* Thunderbird may already have reused the host for the newly selected
+     * row when the stale observer runs. Recreate that row's stock reader after
+     * detaching our generation so a native-pref conversation cannot go blank. */
+    restoreCurrentNativeSelection(state.about3Pane, state.messagePane);
     return;
   }
 
@@ -315,13 +1311,10 @@ function validateGuardedConversation(conversationView) {
     return;
   }
 
-  if (state.disabled || !isExpectedConversationSelection(state)) {
-    if (state.timeoutId) {
-      state.about3Pane.clearTimeout(state.timeoutId);
-      state.timeoutId = 0;
-    }
-    state.disabled = true;
-    retireConversationView(state.messagePane, conversationView);
+  /* Once the selected left-hand row has been opened, leave subsequent manual
+   * accordion changes entirely to Thunderbird. The guard remains only to
+   * retire this host safely when the tree selection changes. */
+  if (state.ready) {
     return;
   }
 
@@ -334,63 +1327,109 @@ function validateGuardedConversation(conversationView) {
   const expandedBrowser = expandedArticle?.querySelector(
     'browser[src="about:message"]'
   );
-  if (
-    loadedMessages.some(message =>
-      state.rootMessage.messageId
-        ? message?.messageId === state.rootMessage.messageId
-        : sameMessage(message, state.rootMessage)
-    )
-  ) {
-    /* Thunderbird cannot safely swap the expanded reader until its initial
-     * MsgLoaded callback has stamped the open article. Keep the whole host
-     * hidden (and therefore unclickable) until that native lifecycle finishes. */
+  const matchedMessages = matchConversationMessages(
+    loadedMessages,
+    state.expectedMessages
+  );
+  const containsExpectedThread = Boolean(matchedMessages);
+  const loadedLatest = loadedMessages.at(-1);
+  if (containsExpectedThread) {
+    const latestMessageId = getMessageId(loadedLatest);
+    const expandedMessageId = String(
+      expandedArticle?.dataset?.messageId || ""
+    ).trim();
+    let displayedMessage = null;
+    try {
+      displayedMessage = expandedBrowser?.contentWindow?.gMessage;
+    } catch (error) {
+      /* A nested reader can be replaced between the DOM query and this read.
+       * Its mutation or timeout will retry/fall back without exposing it. */
+      return;
+    }
+
+    /* The load-capture guard must redirect an older target before Thunderbird
+     * calls displayMessage for its newest-first browser. Once a message has
+     * started loading it is too late to prevent IMAP or auto-read side effects,
+     * so this validation path only accepts the native newest target. */
+    if (!state.activationStarted) {
+      const loadedTarget = state.targetMessage
+        ? [...matchedMessages].find(([expected]) =>
+            sameMessage(expected, state.targetMessage)
+          )?.[1]
+        : loadedLatest;
+      if (!loadedTarget) {
+        failGuardedConversation(state, conversationView);
+        return;
+      }
+
+      if (loadedTarget !== loadedLatest) {
+        /* Before the initial about:message load event, wait for the capture
+         * listener to perform the safe native-row switch. Any evidence that
+         * the provisional reader started displaying is a fail-closed state. */
+        if (
+          displayedMessage ||
+          expandedMessageId ||
+          (expandedBrowser && !expandedBrowser.hidden)
+        ) {
+          failGuardedConversation(state, conversationView);
+        }
+        return;
+      }
+
+      if (
+        !loadedLatest ||
+        !latestMessageId ||
+        !expandedBrowser ||
+        expandedBrowser.hidden ||
+        expandedMessageId !== latestMessageId ||
+        !sameMessage(displayedMessage, loadedLatest)
+      ) {
+        return;
+      }
+      revealGuardedConversation(state, conversationView);
+      return;
+    }
+
+    /* The replacement article receives its identity only after its own
+     * about:message browser fires MsgLoaded. Reveal nothing until both the DOM
+     * stamp and the trusted reader agree with the selected left-hand message. */
     if (
       !expandedBrowser ||
       expandedBrowser.hidden ||
-      !expandedArticle.dataset.messageId
+      !expandedMessageId
     ) {
       return;
     }
-    if (state.timeoutId) {
-      state.about3Pane.clearTimeout(state.timeoutId);
-      state.timeoutId = 0;
+    if (
+      expandedMessageId !== state.targetMessageId ||
+      !sameMessage(displayedMessage, state.loadedTarget)
+    ) {
+      failGuardedConversation(state, conversationView);
+      return;
     }
-    conversationView.hidden = false;
+    revealGuardedConversation(state, conversationView);
     return;
   }
 
   /* A query that does not contain the selected root must never replace the
    * reading pane. The host is still hidden, so fall back before it can paint. */
-  if (state.timeoutId) {
-    state.about3Pane.clearTimeout(state.timeoutId);
-    state.timeoutId = 0;
-  }
-  state.disabled = true;
-  try {
-    retireConversationView(state.messagePane, conversationView);
-    state.messagePane.displayMessage(
-      state.rootMessage.folder.getUriForMsg(state.rootMessage)
-    );
-  } catch (error) {
-    /* A failed recovery must stay blank instead of exposing another thread. */
-    state.disabled = true;
-    conversationView.hidden = true;
-    state.main.replaceChildren();
-    try {
-      state.messagePane.displayMessage(
-        state.rootMessage.folder.getUriForMsg(state.rootMessage)
-      );
-    } catch (displayError) {
-      /* Leave both stale and failed readers hidden. */
-    }
-  }
+  /* A failed or incomplete Gloda result must not send a collapsed thread back
+   * to Thunderbird's permanently truncated legacy summary. Keep the selected
+   * email complete in the ordinary trusted about:message reader instead. */
+  failGuardedConversation(state, conversationView);
 }
 
 function guardConversationView(
   about3Pane,
   messagePane,
   conversationView,
-  rootMessage
+  selectedMessage,
+  expectedMessages,
+  fallbackMessage,
+  dbView,
+  rootMessage,
+  selectedRootOpen,
+  targetMessage
 ) {
   const main = conversationView?.shadowRoot?.getElementById(
     "mainConversation"
@@ -402,6 +1441,10 @@ function guardConversationView(
   let state = conversationGuardState.get(conversationView);
   if (!state || state.main !== main) {
     removeConversationGuard(conversationView);
+    const onBrowserLoad = event => {
+      interceptInitialConversationBrowserLoad(conversationView, event);
+    };
+    main.addEventListener("load", onBrowserLoad, true);
     const observer = new about3Pane.MutationObserver(() => {
       validateGuardedConversation(conversationView);
     });
@@ -411,48 +1454,278 @@ function guardConversationView(
       childList: true,
       subtree: true,
     });
-    state = { main, observer };
+    state = { main, observer, onBrowserLoad };
     conversationGuardState.set(conversationView, state);
     guardedConversationViews.add(conversationView);
   }
   Object.assign(state, {
     about3Pane,
     conversationView,
+    dbView,
     disabled: false,
+    activationStarted: false,
+    expectedMessages,
+    fallbackMessage,
+    loadedTarget: null,
     messagePane,
+    ready: false,
     rootMessage,
-    userConversationViewEnabled: false,
+    selectedMessage,
+    selectedRootOpen,
+    targetMessage,
+    targetMessageId: "",
   });
-  if (state.timeoutId) {
-    about3Pane.clearTimeout(state.timeoutId);
-  }
-  state.timeoutId = about3Pane.setTimeout(() => {
-    state.timeoutId = 0;
-    if (state.userConversationViewEnabled) {
-      validateGuardedConversation(conversationView);
-      return;
-    }
-    if (
-      !state.disabled &&
-      conversationView.hidden &&
-      isExpectedConversationSelection(state)
-    ) {
-      state.disabled = true;
-      retireConversationView(state.messagePane, conversationView);
-      try {
-        state.messagePane.displayMessage(
-          state.rootMessage.folder.getUriForMsg(state.rootMessage)
-        );
-      } catch (error) {
-        /* Keep the empty experimental view hidden if the fallback also fails. */
-      }
-    }
-  }, CONVERSATION_VIEW_LOAD_TIMEOUT_MS);
+  armConversationGuardTimeout(state);
   /* Do not paint an asynchronous result until it has been matched to the live
    * root selection. A correct population unhides the view in the observer's
    * pre-paint microtask. */
   conversationView.hidden = true;
   validateGuardedConversation(conversationView);
+  return true;
+}
+
+async function refreshConversationForPane(about3Pane) {
+  if (
+    about3Pane.closed ||
+    about3Pane.location.href !== "about:3pane"
+  ) {
+    return false;
+  }
+
+  /* Retry until an active vertical mail layout is measurable. Once it
+   * succeeds, the versioned preference makes this a permanent no-op. */
+  maybeApplyOutlookPaneWidths(about3Pane);
+
+  const dbView = about3Pane.gDBView;
+  const threadTree = about3Pane.threadTree;
+  const messagePane = about3Pane.document.querySelector("message-pane");
+  const selectedIndex = threadTree?.selectedIndex ?? -1;
+  const ownedConversationView = messagePane?.querySelector(
+    `:scope > conversation-view[${OWNED_CONVERSATION_ATTRIBUTE}="true"]`
+  );
+
+  /* Thunderbird's legacy multi-message branch does not clear a native
+   * conversation host. Remove the host created for our previous
+   * request before a non-target selection can leave it over another
+   * reader. Unmarked native hosts remain outside this cleanup. */
+  const retireOwnedConversation = () => {
+    if (ownedConversationView) {
+      retireConversationView(messagePane, ownedConversationView);
+    }
+  };
+
+  /* Thunderbird represents a collapsed thread as one selected UI row
+   * but counts every hidden child in numSelected. Target one visible
+   * row instead, so the same conversation UI handles a collapsed
+   * parent, an expanded parent, or any selected reply. */
+  if (
+    !dbView ||
+    !messagePane ||
+    selectedIndex < 0 ||
+    dbView.selection?.count !== 1 ||
+    threadTree.selectedIndices?.length !== 1 ||
+    !about3Pane.gViewWrapper?.showThreaded
+  ) {
+    retireOwnedConversation();
+    return false;
+  }
+
+  if (dbView.getFlagsAt(selectedIndex) & MSG_VIEW_FLAG_DUMMY) {
+    retireOwnedConversation();
+    return false;
+  }
+
+  const thread = dbView.getThreadContainingIndex(selectedIndex);
+  if (!thread || thread.numChildren < 2) {
+    retireOwnedConversation();
+    return false;
+  }
+
+  const selectedMessage = dbView.getMsgHdrAt(selectedIndex);
+  const rootMessage = thread.getRootHdr();
+  if (!selectedMessage || !rootMessage) {
+    retireOwnedConversation();
+    return false;
+  }
+  const selectedRootOpen = isExpandedSelectedRoot(
+    dbView,
+    selectedIndex,
+    selectedMessage,
+    rootMessage
+  );
+  /* A collapsed parent represents the conversation as a whole, so its
+   * native default remains the newest reply. Once the parent is open,
+   * or a visible reply is selected, open that exact left-hand row. */
+  const targetMessage =
+    selectedRootOpen || !sameMessage(selectedMessage, rootMessage)
+      ? selectedMessage
+      : null;
+
+  const selectionStillMatches = () => {
+    try {
+      const currentIndex = threadTree.selectedIndex;
+      const currentThread =
+        currentIndex >= 0
+          ? dbView.getThreadContainingIndex(currentIndex)
+          : null;
+      return (
+        !about3Pane.closed &&
+        about3Pane.gDBView === dbView &&
+        currentIndex === selectedIndex &&
+        dbView.selection?.count === 1 &&
+        threadTree.selectedIndices?.length === 1 &&
+        sameMessage(dbView.getMsgHdrAt(currentIndex), selectedMessage) &&
+        sameMessage(currentThread?.getRootHdr(), rootMessage) &&
+        isExpandedSelectedRoot(
+          dbView,
+          currentIndex,
+          dbView.getMsgHdrAt(currentIndex),
+          currentThread?.getRootHdr()
+        ) === selectedRootOpen
+      );
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const displaySelectedFallback = () => {
+    if (!selectionStillMatches() || !messagePane.isConnected) {
+      return;
+    }
+    try {
+      messagePane.displayMessage(
+        selectedMessage.folder.getUriForMsg(selectedMessage)
+      );
+    } catch (error) {
+      /* A folder or tab can disappear between revalidation and recovery. */
+    }
+  };
+
+  const messages = [];
+  for (let index = 0; index < thread.numChildren; index++) {
+    messages.push(thread.getChildHdrAt(index));
+  }
+
+  /* Thunderbird's legacy multi-message summary permanently truncates
+   * every message to a short snippet. Prefer its native conversation
+   * accordion, which lazy-loads the complete message in an embedded
+   * about:message reader when a compact row is activated. Gloda owns
+   * that view's thread membership, so do not replace the already-full
+   * parent message unless every visible member is safely indexed. */
+  let canUseConversationView = false;
+  try {
+    if (
+      Services.prefs.getBoolPref(GLOBAL_INDEXER_PREF, true) &&
+      about3Pane.document.getElementById("conversationViewTemplate") &&
+      about3Pane.document.getElementById(
+        "conversationViewMessageBrowserTemplate"
+      )
+    ) {
+      const { Gloda } = ChromeUtils.importESModule(
+        "resource:///modules/gloda/GlodaPublic.sys.mjs"
+      );
+      canUseConversationView = messages.every(message =>
+        Gloda.isMessageIndexed(message)
+      );
+    }
+  } catch (error) {
+    /* Unsupported folders and an index being rebuilt are safe
+     * fallbacks: keep Thunderbird's full single-message reader. */
+    canUseConversationView = false;
+  }
+
+  if (!canUseConversationView) {
+    retireOwnedConversation();
+    /* A collapsed thread would otherwise remain in Thunderbird's
+     * permanently truncated legacy summary. When Gloda cannot build
+     * a trustworthy conversation, keep the selected message complete
+     * in the normal reader instead. */
+    displaySelectedFallback();
+    return false;
+  }
+
+  /* Revalidate after collecting the headers in case the user moved to
+   * another message while the event crossed the extension boundary. */
+  if (!selectionStillMatches()) {
+    retireOwnedConversation();
+    return false;
+  }
+
+  /* The native accordion is still pref-gated in Thunderbird 153.
+   * Enable it only for this synchronous display call and restore the
+   * user's preference immediately, so the Companion does not leave a
+   * hidden global setting behind or alter unrelated selections. */
+  const hadConversationUserValue = Services.prefs.prefHasUserValue(
+    CONVERSATION_VIEW_PREF
+  );
+  const previousConversationValue = Services.prefs.getBoolPref(
+    CONVERSATION_VIEW_PREF,
+    false
+  );
+  /* Host identity is the request-generation boundary. Thunderbird 153
+   * does not cancel a conversation's async Gloda, snippet, or MsgLoaded
+   * callbacks, so never reuse a host from an earlier root selection. */
+  retireConversationView(
+    messagePane,
+    messagePane.querySelector(":scope > conversation-view")
+  );
+  const shouldRestoreConversationPref = !previousConversationValue;
+  if (!previousConversationValue) {
+    Services.prefs.setBoolPref(CONVERSATION_VIEW_PREF, true);
+  }
+  try {
+    messagePane.displayMessages(messages);
+    const conversationView = messagePane.querySelector(
+      ":scope > conversation-view"
+    );
+    conversationView?.setAttribute(
+      OWNED_CONVERSATION_ATTRIBUTE,
+      "true"
+    );
+    if (
+      !guardConversationView(
+        about3Pane,
+        messagePane,
+        conversationView,
+        selectedMessage,
+        messages,
+        selectedMessage,
+        dbView,
+        rootMessage,
+        selectedRootOpen,
+        targetMessage
+      )
+    ) {
+      retireConversationView(messagePane, conversationView);
+      displaySelectedFallback();
+      return false;
+    }
+  } catch (error) {
+    /* Native conversation construction spans private Thunderbird DOM and
+     * Gloda APIs. If any step changes within the supported branch, never leave
+     * the reader blank after retiring the previous generation. */
+    const failedConversation = messagePane.querySelector(
+      `:scope > conversation-view[${OWNED_CONVERSATION_ATTRIBUTE}="true"], :scope > conversation-view`
+    );
+    retireConversationView(messagePane, failedConversation);
+    displaySelectedFallback();
+    console.error(
+      "Outlook Style Companion could not create the selected conversation:",
+      error
+    );
+    return false;
+  } finally {
+    if (shouldRestoreConversationPref) {
+      if (hadConversationUserValue) {
+        Services.prefs.setBoolPref(
+          CONVERSATION_VIEW_PREF,
+          previousConversationValue
+        );
+      } else {
+        Services.prefs.clearUserPref(CONVERSATION_VIEW_PREF);
+      }
+    }
+  }
   return true;
 }
 
@@ -765,6 +2038,9 @@ function installMainPaneSchemeBridge(window) {
 
   const bindAbout3Pane = (about3Pane, scheme) => {
     const paneDocument = about3Pane.document;
+    installConversationSelectionCapture(about3Pane, () =>
+      refreshConversationForPane(about3Pane)
+    );
     stampDocument(paneDocument, scheme);
     const previousListener = state.paneListeners.get(about3Pane);
     if (previousListener?.paneDocument !== paneDocument) {
@@ -839,13 +2115,22 @@ function installMainPaneSchemeBridge(window) {
       }
     }
     for (const [about3Pane, listener] of [...state.paneListeners]) {
-      if (about3Pane.closed) {
+      if (about3Pane.closed || !listener.paneDocument.defaultView) {
         listener.paneDocument.removeEventListener(
           "load",
           listener.onLoad,
           true
         );
         listener.observer?.disconnect();
+        try {
+          listener.paneDocument.documentElement?.removeAttribute(
+            OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+          );
+        } catch (error) {
+          /* The closed pane document may already be unavailable. */
+        }
+        state.trackedDocuments.delete(listener.paneDocument);
+        removeConversationSelectionCapture(about3Pane);
         state.paneListeners.delete(about3Pane);
       }
     }
@@ -867,17 +2152,6 @@ function installMainPaneSchemeBridge(window) {
     tabmail.tabContainer ||
     window.document.getElementById("tabmail-tabs") ||
     window.document;
-  window.addEventListener("windowlwthemeupdate", scheduleSync);
-  systemScheme.addEventListener("change", scheduleSync);
-  tabEventTarget.addEventListener("TabSelect", scheduleSync);
-  tabEventTarget.addEventListener("TabOpen", scheduleSync);
-  scheduleSync();
-  /* about:3pane can finish after the already-open messenger window is handed
-   * to the extension. One bounded retry covers that startup race. */
-  state.retryTimer = window.setTimeout(() => {
-    state.retryTimer = 0;
-    scheduleSync();
-  }, 1000);
   Object.assign(state, {
     scheduleSync,
     removeConversationBinding,
@@ -888,6 +2162,19 @@ function installMainPaneSchemeBridge(window) {
   });
   mainPaneSchemeState.set(window, state);
   enhancedMainPaneSchemeWindows.add(window);
+
+  window.addEventListener("windowlwthemeupdate", scheduleSync);
+  systemScheme.addEventListener("change", scheduleSync);
+  tabEventTarget.addEventListener("TabSelect", scheduleSync);
+  tabEventTarget.addEventListener("TabOpen", scheduleSync);
+  tabEventTarget.addEventListener("TabClose", scheduleSync);
+  scheduleSync();
+  /* about:3pane can finish after the already-open messenger window is handed
+   * to the extension. One bounded retry covers that startup race. */
+  state.retryTimer = window.setTimeout(() => {
+    state.retryTimer = 0;
+    scheduleSync();
+  }, 1000);
   return true;
 }
 
@@ -901,6 +2188,7 @@ function removeMainPaneSchemeBridge(window) {
   state.systemScheme.removeEventListener("change", state.scheduleSync);
   state.tabEventTarget.removeEventListener("TabSelect", state.scheduleSync);
   state.tabEventTarget.removeEventListener("TabOpen", state.scheduleSync);
+  state.tabEventTarget.removeEventListener("TabClose", state.scheduleSync);
   if (state.schemeFrame) {
     window.cancelAnimationFrame(state.schemeFrame);
   }
@@ -955,11 +2243,11 @@ const EDITOR_SURFACE_CSS = `
     background-color: var(--outlook-editor-background) !important;
   }
 
-  body[data-outlook-style-default-background] {
+  __OUTLOOK_EDITOR_BACKGROUND_SELECTOR__ {
     background-color: var(--outlook-editor-background) !important;
   }
 
-  body[data-outlook-style-default-color] {
+  __OUTLOOK_EDITOR_COLOR_SELECTOR__ {
     color: var(--outlook-editor-color) !important;
   }
 
@@ -993,11 +2281,11 @@ const EDITOR_SURFACE_CSS = `
       background-color: Canvas !important;
     }
 
-    body[data-outlook-style-default-background] {
+    __OUTLOOK_EDITOR_BACKGROUND_SELECTOR__ {
       background-color: Canvas !important;
     }
 
-    body[data-outlook-style-default-color] {
+    __OUTLOOK_EDITOR_COLOR_SELECTOR__ {
       color: CanvasText !important;
     }
 
@@ -1224,6 +2512,47 @@ function formatEventDuration(seconds) {
   return minutes ? `${hours} hr ${minutes} min` : `${hours} hr`;
 }
 
+function formatAgendaCountdown(minutesUntil) {
+  return minutesUntil === 1 ? "in 1 min" : `in ${minutesUntil} mins`;
+}
+
+function updateAgendaTimeMarker(document, listItem, markerDetails) {
+  const details = listItem.querySelector(":scope > .agenda-listitem-details");
+  let marker = details?.querySelector(":scope > .fluent-time-marker");
+  if (!details || !markerDetails) {
+    marker?.remove();
+    return;
+  }
+
+  if (!marker) {
+    marker = document.createElementNS(HTML_NS, "span");
+    marker.className = "fluent-time-marker";
+    marker.setAttribute("role", "note");
+
+    const pill = document.createElementNS(HTML_NS, "span");
+    pill.className = "fluent-time-pill";
+
+    const icon = document.createElementNS(HTML_NS, "span");
+    icon.className = "fluent-time-pill-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "\u25f7";
+
+    const label = document.createElementNS(HTML_NS, "span");
+    label.className = "fluent-time-pill-label";
+    pill.append(icon, label);
+    marker.append(pill);
+    details.append(marker);
+  }
+
+  const label = marker.querySelector(":scope .fluent-time-pill-label");
+  if (label && label.textContent !== markerDetails.label) {
+    label.textContent = markerDetails.label;
+  }
+  if (marker.getAttribute("aria-label") !== markerDetails.description) {
+    marker.setAttribute("aria-label", markerDetails.description);
+  }
+}
+
 function decorateAgenda(window) {
   const document = window.document;
   const agenda = document.getElementById("agenda");
@@ -1257,15 +2586,21 @@ function decorateAgenda(window) {
   const listItems = [...agenda.querySelectorAll(".agenda-listitem")];
   for (const listItem of listItems) {
     listItem.removeAttribute("data-fluent-next-event");
+    listItem.removeAttribute("data-fluent-time-state");
+    listItem.removeAttribute("data-fluent-time-attention");
   }
 
-  /* Thunderbird supplies a relative countdown for every timed event today or
-   * less than 12 hours away. Outlook displays a single Up Next treatment, so
-   * select the first chronological event that is still active and relevant.
-   * Keep Thunderbird's own localized countdown text and minute updates. */
+  /* Outlook displays a single Up Next treatment for accepted invitations and
+   * personally-created meetings. An accepted meeting within five minutes
+   * away takes priority over an older meeting still in progress. Otherwise,
+   * follow the active meeting that started most recently, or the earliest
+   * upcoming meeting. The Companion owns the exact countdown text so "now" is
+   * never shown before the selected meeting has actually started. */
+  let nextEvent = null;
   if (window.TodayPane?.showsToday) {
     const now = cal.dtz.now();
-    const nextEvent = listItems.find(listItem => {
+    const eligibleEvents = [];
+    for (const [index, listItem] of listItems.entries()) {
       const item = listItem.item;
       if (
         listItem.hidden ||
@@ -1275,7 +2610,7 @@ function decorateAgenda(window) {
         item.startDate.isDate ||
         (typeof item.isEvent === "function" && !item.isEvent())
       ) {
-        return false;
+        continue;
       }
 
       const itemStatus = String(
@@ -1286,25 +2621,135 @@ function decorateAgenda(window) {
       ).toUpperCase();
       if (
         itemStatus === "CANCELLED" ||
-        participationStatus === "DECLINED" ||
-        participationStatus === "DELEGATED"
+        (participationStatus && participationStatus !== "ACCEPTED")
       ) {
-        return false;
+        continue;
       }
 
+      const startDate = listItem._localStartDate || item.startDate;
       try {
         const endDate = listItem._localEndDate || item.endDate;
-        return !endDate || endDate.compare(now) > 0;
+        if (endDate && endDate.compare(now) <= 0) {
+          continue;
+        }
       } catch (error) {
         /* If a provider supplies an unusual date object, retain the future
          * row rather than hiding the only useful Up Next indicator. */
-        return true;
       }
-    });
-    nextEvent?.setAttribute("data-fluent-next-event", "true");
+
+      let isActive = listItem.classList.contains("agenda-listitem-now");
+      let secondsUntil = null;
+      try {
+        secondsUntil = startDate.subtractDate(now).inSeconds;
+        isActive = secondsUntil <= 0;
+      } catch (error) {
+        try {
+          isActive = startDate.compare(now) <= 0;
+        } catch (compareError) {
+          /* Thunderbird's native now class remains a safe fallback. */
+        }
+      }
+      eligibleEvents.push({
+        index,
+        isActive,
+        listItem,
+        secondsUntil,
+        startDate,
+      });
+    }
+
+    const pickEarlier = (earliest, candidate) => {
+      if (!earliest) {
+        return candidate;
+      }
+      try {
+        return candidate.startDate.compare(earliest.startDate) < 0
+          ? candidate
+          : earliest;
+      } catch (error) {
+        return candidate.index < earliest.index ? candidate : earliest;
+      }
+    };
+    const activeEvents = eligibleEvents.filter(event => event.isActive);
+    const activeEvent = activeEvents.reduce((latest, candidate) => {
+      if (!latest) {
+        return candidate;
+      }
+      try {
+        return candidate.startDate.compare(latest.startDate) > 0
+          ? candidate
+          : latest;
+      } catch (error) {
+        return candidate.index > latest.index ? candidate : latest;
+      }
+    }, null);
+    const futureEvents = eligibleEvents.filter(event => !event.isActive);
+    const imminentEvent = futureEvents
+      .filter(
+        event =>
+          Number.isFinite(event.secondsUntil) &&
+          event.secondsUntil > 0 &&
+          event.secondsUntil <= 5 * 60
+      )
+      .reduce(pickEarlier, null);
+    const futureEvent = futureEvents.reduce(pickEarlier, null);
+    nextEvent = imminentEvent || activeEvent || futureEvent;
+
+    if (nextEvent) {
+      let label = "";
+      let description = "";
+      let state = "upcoming";
+      let shouldShow = false;
+      let needsAttention = false;
+      if (nextEvent.isActive) {
+        label = "now";
+        description = "Meeting in progress";
+        state = "active";
+        shouldShow = true;
+        needsAttention =
+          Number.isFinite(nextEvent.secondsUntil) &&
+          nextEvent.secondsUntil > -3 * 60;
+      } else if (Number.isFinite(nextEvent.secondsUntil)) {
+        const minutesUntil = Math.max(
+          1,
+          Math.ceil(nextEvent.secondsUntil / 60)
+        );
+        label = formatAgendaCountdown(minutesUntil);
+        description =
+          minutesUntil === 1
+            ? "Meeting starts in 1 minute"
+            : `Meeting starts in ${minutesUntil} minutes`;
+        const isSameDay =
+          nextEvent.startDate.year === now.year &&
+          nextEvent.startDate.month === now.month &&
+          nextEvent.startDate.day === now.day;
+        shouldShow = isSameDay || nextEvent.secondsUntil < 12 * 60 * 60;
+        if (nextEvent.secondsUntil <= 5 * 60) {
+          state = "imminent";
+          needsAttention = true;
+        }
+      }
+
+      if (shouldShow && label) {
+        nextEvent.markerDetails = { description, label };
+        nextEvent.listItem.setAttribute("data-fluent-next-event", "true");
+        nextEvent.listItem.setAttribute("data-fluent-time-state", state);
+        if (needsAttention) {
+          nextEvent.listItem.setAttribute(
+            "data-fluent-time-attention",
+            "true"
+          );
+        }
+      }
+    }
   }
 
   for (const listItem of listItems) {
+    updateAgendaTimeMarker(
+      document,
+      listItem,
+      listItem === nextEvent?.listItem ? nextEvent.markerDetails : null
+    );
     const dateHeader = listItem.querySelector(":scope > .agenda-date-header");
     const date = parseAgendaDate(listItem.dateString);
     listItem.removeAttribute("data-fluent-hide-date-header");
@@ -1363,6 +2808,35 @@ function decorateAgenda(window) {
   }
 }
 
+function removeStaleTodayPaneMarkup(window) {
+  const document = window.document;
+  for (const orphan of document.querySelectorAll(
+    [
+      "#fluent-myday-tabs",
+      "#fluent-myday-popout",
+      "#fluent-today-intro",
+      "#fluent-today-month-button",
+      "#fluent-today-month-panel",
+      "#fluent-today-more",
+      "#fluent-today-more-popup",
+    ].join(",")
+  )) {
+    orphan.hidePopup?.();
+    orphan.remove();
+  }
+  document
+    .querySelector("#today-pane-panel > .sidebar-header")
+    ?.classList.remove("fluent-myday-enhanced");
+  document
+    .getElementById("today-pane-panel")
+    ?.removeAttribute("data-fluent-myday");
+  const nativeMonthInput = document
+    .getElementById("today-minimonth")
+    ?.querySelector(".minimonth-header .minimonth-month-name");
+  nativeMonthInput?.removeAttribute("hidden");
+  nativeMonthInput?.removeAttribute("aria-hidden");
+}
+
 function enhanceTodayPane(window) {
   const document = window.document;
   const panel = document.getElementById("today-pane-panel");
@@ -1401,24 +2875,7 @@ function enhanceTodayPane(window) {
    * If the old module did not receive its shutdown hook, discard its inert
    * injected controls before creating this version's live set. querySelectorAll
    * is intentional because duplicate IDs are exactly the state being repaired. */
-  for (const orphan of document.querySelectorAll(
-    [
-      "#fluent-myday-tabs",
-      "#fluent-myday-popout",
-      "#fluent-today-intro",
-      "#fluent-today-month-button",
-      "#fluent-today-month-panel",
-      "#fluent-today-more",
-      "#fluent-today-more-popup",
-    ].join(",")
-  )) {
-    orphan.hidePopup?.();
-    orphan.remove();
-  }
-  header.classList.remove("fluent-myday-enhanced");
-  panel.removeAttribute("data-fluent-myday");
-  nativeMonthInput.removeAttribute("hidden");
-  nativeMonthInput.removeAttribute("aria-hidden");
+  removeStaleTodayPaneMarkup(window);
 
   const tabs = document.createXULElement("hbox");
   tabs.id = "fluent-myday-tabs";
@@ -1813,34 +3270,6 @@ function enhanceTodayPane(window) {
   const onPopout = () => document.getElementById("tabmail")?.openTab("calendar");
   const onQuickTask = () =>
     window.goDoCommand("calendar_new_todo_todaypane_command");
-  calendarTab.addEventListener("command", onCalendar);
-  todoTab.addEventListener("command", onTodo);
-  popout.addEventListener("command", onPopout);
-  quickTask.addEventListener("click", onQuickTask);
-  monthButton.addEventListener("click", onMonthButton);
-  monthPanel.addEventListener("popupshown", onMonthPopupShown);
-  monthPanel.addEventListener("popuphidden", onMonthPopupHidden);
-  yearPrevious.addEventListener("click", onPreviousYear);
-  yearNext.addEventListener("click", onNextYear);
-  monthGrid.addEventListener("click", onMonthChoice);
-  monthPicker.addEventListener("keydown", onMonthPickerKeyDown);
-  monthToday.addEventListener("click", onMonthToday);
-  moreButton.addEventListener("command", onMore);
-  morePopup.addEventListener("popupshowing", onMorePopupShowing);
-  morePopup.addEventListener("popupshown", onMorePopupShown);
-  morePopup.addEventListener("popuphidden", onMorePopupHidden);
-  agendaItem.addEventListener("command", onAgendaView);
-  dayItem.addEventListener("command", onDayView);
-  calendarItem.addEventListener("command", onToggleCalendar);
-  tasksItem.addEventListener("command", onToggleTasks);
-  showAllItem.addEventListener("command", onShowAll);
-
-  const tabObserver = new window.MutationObserver(() => syncTodayPaneTabs(window));
-  tabObserver.observe(nativeHeader, {
-    attributes: true,
-    attributeFilter: ["index"],
-  });
-
   let decorationFrame = 0;
   const scheduleDecoration = () => {
     if (decorationFrame) {
@@ -1851,16 +3280,10 @@ function enhanceTodayPane(window) {
       decorateAgenda(window);
     });
   };
+  const tabObserver = new window.MutationObserver(() =>
+    syncTodayPaneTabs(window)
+  );
   const agendaObserver = new window.MutationObserver(scheduleDecoration);
-  agendaObserver.observe(agenda, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ["hidden", "class", "status"],
-  });
-  minimonth.addEventListener("change", scheduleDecoration);
-  minimonth.addEventListener("monthchange", syncMonthButton);
   todayPaneState.set(window, {
     agendaObserver,
     tabObserver,
@@ -1910,12 +3333,48 @@ function enhanceTodayPane(window) {
     onToggleTasks,
     onShowAll,
     scheduleDecoration,
+    metronomeCallback: scheduleDecoration,
     get decorationFrame() {
       return decorationFrame;
     },
   });
   enhancedTodayPaneWindows.add(window);
 
+  calendarTab.addEventListener("command", onCalendar);
+  todoTab.addEventListener("command", onTodo);
+  popout.addEventListener("command", onPopout);
+  quickTask.addEventListener("click", onQuickTask);
+  monthButton.addEventListener("click", onMonthButton);
+  monthPanel.addEventListener("popupshown", onMonthPopupShown);
+  monthPanel.addEventListener("popuphidden", onMonthPopupHidden);
+  yearPrevious.addEventListener("click", onPreviousYear);
+  yearNext.addEventListener("click", onNextYear);
+  monthGrid.addEventListener("click", onMonthChoice);
+  monthPicker.addEventListener("keydown", onMonthPickerKeyDown);
+  monthToday.addEventListener("click", onMonthToday);
+  moreButton.addEventListener("command", onMore);
+  morePopup.addEventListener("popupshowing", onMorePopupShowing);
+  morePopup.addEventListener("popupshown", onMorePopupShown);
+  morePopup.addEventListener("popuphidden", onMorePopupHidden);
+  agendaItem.addEventListener("command", onAgendaView);
+  dayItem.addEventListener("command", onDayView);
+  calendarItem.addEventListener("command", onToggleCalendar);
+  tasksItem.addEventListener("command", onToggleTasks);
+  showAllItem.addEventListener("command", onShowAll);
+  tabObserver.observe(nativeHeader, {
+    attributes: true,
+    attributeFilter: ["index"],
+  });
+  agendaObserver.observe(agenda, {
+    subtree: true,
+    childList: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["hidden", "class", "status"],
+  });
+  CalMetronome.on("minute", scheduleDecoration);
+  minimonth.addEventListener("change", scheduleDecoration);
+  minimonth.addEventListener("monthchange", syncMonthButton);
   syncTodayPaneTabs(window);
   syncMonthButton();
   scheduleDecoration();
@@ -1930,6 +3389,7 @@ function removeTodayPaneEnhancement(window) {
 
   state.agendaObserver.disconnect();
   state.tabObserver.disconnect();
+  CalMetronome.off("minute", state.metronomeCallback);
   if (state.decorationFrame) {
     window.cancelAnimationFrame(state.decorationFrame);
   }
@@ -1991,13 +3451,15 @@ function removeTodayPaneEnhancement(window) {
     ?.classList.remove("fluent-myday-enhanced");
   document.getElementById("today-pane-panel")?.removeAttribute("data-fluent-myday");
   for (const element of document.querySelectorAll(
-    "#agenda .fluent-event-duration"
+    "#agenda .fluent-event-duration, #agenda .fluent-time-marker"
   )) {
     element.remove();
   }
   for (const listItem of document.querySelectorAll("#agenda .agenda-listitem")) {
     listItem.removeAttribute("data-fluent-hide-date-header");
     listItem.removeAttribute("data-fluent-next-event");
+    listItem.removeAttribute("data-fluent-time-state");
+    listItem.removeAttribute("data-fluent-time-attention");
     if (listItem.dateString) {
       listItem.dateString = listItem.dateString;
     }
@@ -2007,28 +3469,48 @@ function removeTodayPaneEnhancement(window) {
   enhancedTodayPaneWindows.delete(window);
 }
 
+function rollbackTodayPaneEnhancement(window) {
+  if (todayPaneState.has(window)) {
+    removeTodayPaneEnhancement(window);
+  } else {
+    removeStaleTodayPaneMarkup(window);
+  }
+}
+
 function installTodayPaneEnhancement() {
   if (todayPaneListenerRegistered) {
     return true;
   }
-  todayPaneListenerRegistered = ExtensionSupport.registerWindowListener(
-    TODAY_PANE_LISTENER_ID,
-    {
-      chromeURLs: [MESSENGER_WINDOW_URL],
-      onLoadWindow: enhanceTodayPane,
-      onUnloadWindow: removeTodayPaneEnhancement,
-    }
-  );
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "a Today pane window",
+      window,
+      enhanceTodayPane,
+      rollbackTodayPaneEnhancement
+    );
+  ExtensionSupport.registerWindowListener(TODAY_PANE_LISTENER_ID, {
+    chromeURLs: [MESSENGER_WINDOW_URL],
+    onLoadWindow: enhanceWindow,
+    onUnloadWindow: removeTodayPaneEnhancement,
+  });
+  todayPaneListenerRegistered = true;
   /* The extension background starts inside an already-open messenger window.
    * ExtensionSupport does not consistently replay that window to a newly
    * registered listener in all Thunderbird startup paths, so cover it here. */
   const windows = Services.wm.getEnumerator("mail:3pane");
   while (windows.hasMoreElements()) {
     const window = windows.getNext();
-    if (window.document?.location?.href === MESSENGER_WINDOW_URL) {
-      enhanceTodayPane(window);
-      scheduleOutlookPaneWidths(window);
-    }
+    enhanceWindowSafely("an existing mail window", window, currentWindow => {
+      if (currentWindow.document?.location?.href !== MESSENGER_WINDOW_URL) {
+        return false;
+      }
+      enhanceWindow(currentWindow);
+      return enhanceWindowSafely(
+        "pane widths for a mail window",
+        currentWindow,
+        scheduleOutlookPaneWidths
+      );
+    });
   }
   return todayPaneListenerRegistered;
 }
@@ -2037,20 +3519,28 @@ function installMainPaneSchemeEnhancement() {
   if (mainPaneSchemeListenerRegistered) {
     return true;
   }
-  mainPaneSchemeListenerRegistered = ExtensionSupport.registerWindowListener(
-    MAIN_PANE_SCHEME_LISTENER_ID,
-    {
-      chromeURLs: [MESSENGER_WINDOW_URL],
-      onLoadWindow: installMainPaneSchemeBridge,
-      onUnloadWindow: removeMainPaneSchemeBridge,
-    }
-  );
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "a main-pane scheme window",
+      window,
+      installMainPaneSchemeBridge,
+      removeMainPaneSchemeBridge
+    );
+  ExtensionSupport.registerWindowListener(MAIN_PANE_SCHEME_LISTENER_ID, {
+    chromeURLs: [MESSENGER_WINDOW_URL],
+    onLoadWindow: enhanceWindow,
+    onUnloadWindow: removeMainPaneSchemeBridge,
+  });
+  mainPaneSchemeListenerRegistered = true;
   const windows = Services.wm.getEnumerator("mail:3pane");
   while (windows.hasMoreElements()) {
     const window = windows.getNext();
-    if (window.document?.location?.href === MESSENGER_WINDOW_URL) {
-      installMainPaneSchemeBridge(window);
-    }
+    enhanceWindowSafely("an existing mail window", window, currentWindow => {
+      if (currentWindow.document?.location?.href !== MESSENGER_WINDOW_URL) {
+        return false;
+      }
+      return enhanceWindow(currentWindow);
+    });
   }
   return mainPaneSchemeListenerRegistered;
 }
@@ -2105,10 +3595,26 @@ function getMeetingStartSnooze(window, widget) {
 }
 
 function removeReminderWidgetDecoration(entry) {
-  entry.popup.removeEventListener("popupshowing", entry.onPopupShowing);
-  entry.menuItem.removeEventListener("command", entry.onCommand);
-  entry.menuItem.remove();
-  entry.separator.remove();
+  try {
+    entry.popup.removeEventListener("popupshowing", entry.onPopupShowing);
+  } catch (error) {
+    /* A closing reminder can destroy its popup before owned cleanup. */
+  }
+  try {
+    entry.menuItem.removeEventListener("command", entry.onCommand);
+  } catch (error) {
+    /* Continue removing the remaining owned nodes. */
+  }
+  try {
+    entry.menuItem.remove();
+  } catch (error) {
+    /* The menu item may already have been removed by native teardown. */
+  }
+  try {
+    entry.separator.remove();
+  } catch (error) {
+    /* The separator may already have been removed by native teardown. */
+  }
 }
 
 function decorateReminderWidgets(window) {
@@ -2146,9 +3652,6 @@ function decorateReminderWidgets(window) {
 
     const separator = window.document.createXULElement("menuseparator");
     separator.className = "outlook-snooze-until-start-separator";
-
-    popup.insertBefore(menuItem, firstPreset);
-    popup.insertBefore(separator, firstPreset);
 
     const updateMenuItem = () => {
       const details = getMeetingStartSnooze(window, widget);
@@ -2204,16 +3707,28 @@ function decorateReminderWidgets(window) {
       }
     };
 
-    popup.addEventListener("popupshowing", updateMenuItem);
-    menuItem.addEventListener("command", onCommand);
-    state.widgets.set(widget, {
+    const entry = {
       popup,
       menuItem,
       separator,
       onPopupShowing: updateMenuItem,
       onCommand,
-    });
-    updateMenuItem();
+    };
+    state.widgets.set(widget, entry);
+    try {
+      popup.insertBefore(menuItem, firstPreset);
+      popup.insertBefore(separator, firstPreset);
+      popup.addEventListener("popupshowing", updateMenuItem);
+      menuItem.addEventListener("command", onCommand);
+      updateMenuItem();
+    } catch (error) {
+      state.widgets.delete(widget);
+      removeReminderWidgetDecoration(entry);
+      console.error(
+        "Outlook Style Companion could not enhance a reminder widget:",
+        error
+      );
+    }
   }
 }
 
@@ -2252,40 +3767,65 @@ function applyEditorDocumentSurface(document, preserveExplicitBodyColors) {
     return null;
   }
 
-  document.getElementById(EDITOR_SURFACE_STYLE_ID)?.remove();
-  const style = document.createElementNS(HTML_NS, "style");
-  style.id = EDITOR_SURFACE_STYLE_ID;
-  style.textContent = EDITOR_SURFACE_CSS;
-  (document.head || root).appendChild(style);
+  const CSSStyleSheet = document.defaultView?.CSSStyleSheet;
+  if (
+    typeof CSSStyleSheet !== "function" ||
+    !("adoptedStyleSheets" in document)
+  ) {
+    return null;
+  }
+  let styleSheet;
+  try {
+    styleSheet = new CSSStyleSheet();
+    document.adoptedStyleSheets = [
+      ...document.adoptedStyleSheets,
+      styleSheet,
+    ];
+  } catch (error) {
+    /* Fail closed if this editor does not support non-serializing sheets. */
+    return null;
+  }
 
   const updateBodyDefaults = () => {
     const useDefaultBackground =
       !preserveExplicitBodyColors || !bodyHasExplicitBackground(body);
     const useDefaultColor =
       !preserveExplicitBodyColors || !bodyHasExplicitColor(body);
-    body.toggleAttribute(
-      "data-outlook-style-default-background",
-      useDefaultBackground
+    const backgroundSelector = useDefaultBackground ? "body" : "body:not(body)";
+    const colorSelector = useDefaultColor ? "body" : "body:not(body)";
+    styleSheet.replaceSync(
+      EDITOR_SURFACE_CSS.replaceAll(
+        "__OUTLOOK_EDITOR_BACKGROUND_SELECTOR__",
+        backgroundSelector
+      ).replaceAll("__OUTLOOK_EDITOR_COLOR_SELECTOR__", colorSelector)
     );
-    body.toggleAttribute("data-outlook-style-default-color", useDefaultColor);
   };
-  updateBodyDefaults();
-
   let observer = null;
-  if (preserveExplicitBodyColors) {
-    observer = new document.defaultView.MutationObserver(updateBodyDefaults);
-    observer.observe(body, {
-      attributes: true,
-      attributeFilter: ["style", "bgcolor", "background", "text"],
-    });
+  const cleanup = () => {
+    observer?.disconnect();
+    try {
+      document.adoptedStyleSheets = document.adoptedStyleSheets.filter(
+        candidate => candidate !== styleSheet
+      );
+    } catch (error) {
+      /* A closing editor can destroy its document before window cleanup. */
+    }
+  };
+  try {
+    updateBodyDefaults();
+    if (preserveExplicitBodyColors) {
+      observer = new document.defaultView.MutationObserver(updateBodyDefaults);
+      observer.observe(body, {
+        attributes: true,
+        attributeFilter: ["style", "bgcolor", "background", "text"],
+      });
+    }
+  } catch (error) {
+    cleanup();
+    throw error;
   }
 
-  return () => {
-    observer?.disconnect();
-    body.removeAttribute("data-outlook-style-default-background");
-    body.removeAttribute("data-outlook-style-default-color");
-    style.remove();
-  };
+  return cleanup;
 }
 
 /**
@@ -2316,14 +3856,20 @@ function trackEditorSurface(editor, preserveExplicitBodyColors) {
     }
   };
 
-  editor.addEventListener("load", onLoad, true);
-  applyCurrentDocument();
-
-  return () => {
+  const cleanup = () => {
     editor.removeEventListener("load", onLoad, true);
     removeDocumentSurface?.();
     removeDocumentSurface = null;
   };
+  try {
+    editor.addEventListener("load", onLoad, true);
+    applyCurrentDocument();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+
+  return cleanup;
 }
 
 function enhanceComposeEditorSurface(window, cleanups) {
@@ -2344,15 +3890,14 @@ function enhanceComposeEditorSurface(window, cleanups) {
   };
 
   const observer = new window.MutationObserver(bindEditor);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  bindEditor();
-
   cleanups.push(() => {
     observer.disconnect();
     removeEditorTracking?.();
     removeEditorTracking = null;
     editor = null;
   });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  bindEditor();
 }
 
 /**
@@ -2376,6 +3921,7 @@ function installRememberedEventWindowGeometry(
   let geometryTrackingReady = false;
   let userResizedGeometry = false;
   let geometryTimer = 0;
+  let geometryReleaseTimer = 0;
   let geometrySettleTimer = 0;
   let resizeTimer = 0;
 
@@ -2503,7 +4049,11 @@ function installRememberedEventWindowGeometry(
         error
       );
     }
-    window.setTimeout(() => {
+    if (geometryReleaseTimer) {
+      window.clearTimeout(geometryReleaseTimer);
+    }
+    geometryReleaseTimer = window.setTimeout(() => {
+      geometryReleaseTimer = 0;
       applyingGeometry = false;
     }, 0);
     /* Ignore the resize event generated by resizeTo() and any final native
@@ -2537,25 +4087,31 @@ function installRememberedEventWindowGeometry(
     );
   };
 
+  cleanups.push(() => {
+    try {
+      saveWindowGeometry();
+    } finally {
+      if (rememberUserResize) {
+        window.removeEventListener("resize", onWindowResize);
+      }
+      if (geometryTimer) {
+        window.clearTimeout(geometryTimer);
+      }
+      if (geometryReleaseTimer) {
+        window.clearTimeout(geometryReleaseTimer);
+        geometryReleaseTimer = 0;
+      }
+      if (geometrySettleTimer) {
+        window.clearTimeout(geometrySettleTimer);
+      }
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+    }
+  });
   if (rememberUserResize) {
     window.addEventListener("resize", onWindowResize);
   }
-
-  cleanups.push(() => {
-    saveWindowGeometry();
-    if (rememberUserResize) {
-      window.removeEventListener("resize", onWindowResize);
-    }
-    if (geometryTimer) {
-      window.clearTimeout(geometryTimer);
-    }
-    if (geometrySettleTimer) {
-      window.clearTimeout(geometrySettleTimer);
-    }
-    if (resizeTimer) {
-      window.clearTimeout(resizeTimer);
-    }
-  });
 
   return { schedule: scheduleWindowGeometry };
 }
@@ -2717,6 +4273,7 @@ function formatInlineAttendee(attendee) {
  */
 function enhanceInlineGuestsEditor(itemFrame) {
   const hostWindow = itemFrame.ownerDocument.defaultView;
+  const installDeadline = hostWindow.performance.now() + 15000;
   let disposed = false;
   let retryTimer = 0;
   let attendeeObserver = null;
@@ -2731,6 +4288,13 @@ function enhanceInlineGuestsEditor(itemFrame) {
   let openSchedulingButton = null;
   let feedback = null;
   let calendarPicker = null;
+
+  const scheduleInstallRetry = install => {
+    if (disposed || hostWindow.performance.now() >= installDeadline) {
+      return;
+    }
+    retryTimer = hostWindow.setTimeout(install, 100);
+  };
 
   const setFeedback = message => {
     if (feedback) {
@@ -2934,7 +4498,7 @@ function enhanceInlineGuestsEditor(itemFrame) {
       typeof frameWindow.updateAttendeeInterface !== "function" ||
       typeof frameWindow.editAttendees !== "function"
     ) {
-      retryTimer = hostWindow.setTimeout(install, 100);
+      scheduleInstallRetry(install);
       return;
     }
     if (!frameWindow.calendarItem.isEvent()) {
@@ -2943,7 +4507,7 @@ function enhanceInlineGuestsEditor(itemFrame) {
 
     const titleRow = frameDocument.getElementById("event-grid-title-row");
     if (!titleRow) {
-      retryTimer = hostWindow.setTimeout(install, 100);
+      scheduleInstallRetry(install);
       return;
     }
     frameDocument
@@ -3068,8 +4632,7 @@ function enhanceInlineGuestsEditor(itemFrame) {
     renderChips();
   };
 
-  install();
-  return () => {
+  const cleanup = () => {
     disposed = true;
     if (retryTimer) {
       hostWindow.clearTimeout(retryTimer);
@@ -3130,9 +4693,16 @@ function enhanceInlineGuestsEditor(itemFrame) {
     frameWindow = null;
     frameDocument = null;
   };
+  try {
+    install();
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+  return cleanup;
 }
 
-function getAttendeeDialogThemeSource(window) {
+function getChildDialogThemeSource(window) {
   try {
     if (window.opener?.top && !window.opener.top.closed) {
       return window.opener.top;
@@ -3141,13 +4711,13 @@ function getAttendeeDialogThemeSource(window) {
       return window.opener;
     }
   } catch (error) {
-    /* Fall back to the attendee window if its opener is being destroyed. */
+    /* Fall back to the child dialog if its opener is being destroyed. */
   }
   return window;
 }
 
-function installAttendeeDialogThemeBridge(window, cleanups) {
-  const sourceWindow = getAttendeeDialogThemeSource(window);
+function installChildDialogThemeBridge(window, cleanups) {
+  const sourceWindow = getChildDialogThemeSource(window);
   const sourceRoot = sourceWindow.document?.documentElement;
   const getSourceScheme = () => {
     const nativeScheme = sourceRoot?.getAttribute("lwt-sidebar");
@@ -3174,6 +4744,17 @@ function installAttendeeDialogThemeBridge(window, cleanups) {
   const sourceObserver = sourceRoot
     ? new sourceWindow.MutationObserver(syncScheme)
     : null;
+  const sourceSystemScheme = sourceWindow.matchMedia(
+    "(prefers-color-scheme: dark)"
+  );
+  cleanups.push(() => {
+    sourceObserver?.disconnect();
+    sourceWindow.removeEventListener("windowlwthemeupdate", syncScheme);
+    sourceSystemScheme.removeEventListener("change", syncScheme);
+    window.document.documentElement?.removeAttribute(
+      OUTLOOK_COLOR_SCHEME_ATTRIBUTE
+    );
+  });
   sourceObserver?.observe(sourceRoot, {
     attributes: true,
     attributeFilter: [
@@ -3183,25 +4764,20 @@ function installAttendeeDialogThemeBridge(window, cleanups) {
       "style",
     ],
   });
-  const sourceSystemScheme = sourceWindow.matchMedia(
-    "(prefers-color-scheme: dark)"
-  );
   sourceWindow.addEventListener("windowlwthemeupdate", syncScheme);
   sourceSystemScheme.addEventListener("change", syncScheme);
   syncScheme();
-
-  cleanups.push(() => {
-    sourceObserver?.disconnect();
-    sourceWindow.removeEventListener("windowlwthemeupdate", syncScheme);
-    sourceSystemScheme.removeEventListener("change", syncScheme);
-    window.document.documentElement?.removeAttribute(
-      OUTLOOK_COLOR_SCHEME_ATTRIBUTE
-    );
-  });
 }
 
 function installAttendeeDialogGeometry(window, cleanups) {
-  let geometryTimer = window.setTimeout(() => {
+  let geometryTimer = 0;
+  cleanups.push(() => {
+    if (geometryTimer) {
+      window.clearTimeout(geometryTimer);
+      geometryTimer = 0;
+    }
+  });
+  geometryTimer = window.setTimeout(() => {
     geometryTimer = 0;
     if (
       window.closed ||
@@ -3210,7 +4786,19 @@ function installAttendeeDialogGeometry(window, cleanups) {
     ) {
       return;
     }
-    const screen = window.screen;
+    let opener = null;
+    let screen = window.screen;
+    try {
+      opener = getChildDialogThemeSource(window);
+      if (opener !== window && !opener.closed) {
+        screen = opener.screen || screen;
+      } else {
+        opener = null;
+      }
+    } catch (error) {
+      /* The child window's screen remains a safe fallback. */
+      opener = null;
+    }
     const availableLeft = Number(screen?.availLeft) || 0;
     const availableTop = Number(screen?.availTop) || 0;
     const availableWidth = Math.max(640, Number(screen?.availWidth) || 1100);
@@ -3230,8 +4818,7 @@ function installAttendeeDialogGeometry(window, cleanups) {
     let centerX = availableLeft + availableWidth / 2;
     let centerY = availableTop + availableHeight / 2;
     try {
-      const opener = getAttendeeDialogThemeSource(window);
-      if (opener !== window && !opener.closed) {
+      if (opener) {
         centerX = opener.screenX + opener.outerWidth / 2;
         centerY = opener.screenY + opener.outerHeight / 2;
       }
@@ -3263,25 +4850,26 @@ function installAttendeeDialogGeometry(window, cleanups) {
     }
   }, 100);
 
-  cleanups.push(() => {
-    if (geometryTimer) {
-      window.clearTimeout(geometryTimer);
-      geometryTimer = 0;
-    }
-  });
 }
 
 function enhanceAttendeeDialogSurface(window, cleanups) {
   const document = window.document;
+  let notice = null;
+  cleanups.push(() => {
+    notice?.remove();
+    document.documentElement.removeAttribute(
+      "data-outlook-attendee-dialog"
+    );
+  });
   document.documentElement.setAttribute(
     "data-outlook-attendee-dialog",
     "true"
   );
-  installAttendeeDialogThemeBridge(window, cleanups);
+  installChildDialogThemeBridge(window, cleanups);
   installAttendeeDialogGeometry(window, cleanups);
 
   document.getElementById("outlook-style-availability-notice")?.remove();
-  const notice = document.createElementNS(HTML_NS, "div");
+  notice = document.createElementNS(HTML_NS, "div");
   notice.id = "outlook-style-availability-notice";
   notice.setAttribute("role", "note");
   notice.textContent =
@@ -3293,12 +4881,119 @@ function enhanceAttendeeDialogSurface(window, cleanups) {
     (document.querySelector("dialog") || document.body).prepend(notice);
   }
 
+}
+
+function enhanceSpellCheckDialogSurface(window, cleanups) {
+  const document = window.document;
+  const root = document.documentElement;
+  const suggestedList = document.getElementById("SuggestedList");
+  const dictionaryList = document.getElementById("dictionary-list");
+  let disposed = false;
+  let firstFrame = 0;
+  let secondFrame = 0;
+  let fallbackTimer = 0;
+  let settleTimer = 0;
   cleanups.push(() => {
-    notice.remove();
-    document.documentElement.removeAttribute(
-      "data-outlook-attendee-dialog"
-    );
+    root.removeAttribute("data-outlook-style-spell-dialog");
+    root.style.removeProperty("--outlook-spell-dialog-min-width");
+    root.style.removeProperty("--outlook-spell-dialog-min-height");
   });
+
+  let targetScreen = window.screen;
+  try {
+    if (window.opener && !window.opener.closed) {
+      targetScreen = window.opener.screen || targetScreen;
+    }
+  } catch (error) {
+    /* Use the spell window's current screen if its opener is closing. */
+  }
+  const availableWidth = Math.max(
+    1,
+    Number(targetScreen?.availWidth) || 520
+  );
+  const availableHeight = Math.max(
+    1,
+    Number(targetScreen?.availHeight) || 360
+  );
+  root.style.setProperty(
+    "--outlook-spell-dialog-min-width",
+    `${Math.min(520, Math.max(1, availableWidth - 48))}px`
+  );
+  root.style.setProperty(
+    "--outlook-spell-dialog-min-height",
+    `${Math.min(360, Math.max(1, availableHeight - 48))}px`
+  );
+  root.setAttribute("data-outlook-style-spell-dialog", "true");
+  installChildDialogThemeBridge(window, cleanups);
+
+  const centerAfterPaint = () => {
+    if (disposed || window.closed || firstFrame || secondFrame) {
+      return;
+    }
+    firstFrame = window.requestAnimationFrame(() => {
+      firstFrame = 0;
+      secondFrame = window.requestAnimationFrame(() => {
+        secondFrame = 0;
+        centerWindowOverOpener(window);
+      });
+    });
+  };
+  let readyObserver = null;
+  const onInitialResize = () => centerAfterPaint();
+  cleanups.push(() => {
+    disposed = true;
+    readyObserver?.disconnect();
+    window.removeEventListener("resize", onInitialResize);
+    if (firstFrame) {
+      window.cancelAnimationFrame(firstFrame);
+    }
+    if (secondFrame) {
+      window.cancelAnimationFrame(secondFrame);
+    }
+    if (fallbackTimer) {
+      window.clearTimeout(fallbackTimer);
+    }
+    if (settleTimer) {
+      window.clearTimeout(settleTimer);
+    }
+  });
+
+  /* Put the dialog somewhere visible immediately. Thunderbird finishes its
+   * dictionary query asynchronously and calls sizeToContent() afterward, so
+   * repeat the placement after that final native sizing pass. */
+  centerWindowOverOpener(window);
+  centerAfterPaint();
+
+  readyObserver = new window.MutationObserver(() => {
+    if (
+      suggestedList?.childElementCount ||
+      dictionaryList?.childElementCount
+    ) {
+      readyObserver.disconnect();
+      centerAfterPaint();
+    }
+  });
+  if (suggestedList?.childElementCount || dictionaryList?.childElementCount) {
+    centerAfterPaint();
+  } else {
+    if (suggestedList) {
+      readyObserver.observe(suggestedList, { childList: true, subtree: true });
+    }
+    if (dictionaryList) {
+      readyObserver.observe(dictionaryList, { childList: true, subtree: true });
+    }
+  }
+
+  window.addEventListener("resize", onInitialResize);
+  fallbackTimer = window.setTimeout(() => {
+    fallbackTimer = 0;
+    centerAfterPaint();
+  }, 500);
+  settleTimer = window.setTimeout(() => {
+    settleTimer = 0;
+    window.removeEventListener("resize", onInitialResize);
+  }, 1000);
+
 }
 
 function enhanceEventEditorSurface(window, cleanups) {
@@ -3368,9 +5063,6 @@ function enhanceEventEditorSurface(window, cleanups) {
   };
 
   const observer = new window.MutationObserver(bindItemFrame);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  bindItemFrame();
-
   cleanups.push(() => {
     observer.disconnect();
     try {
@@ -3398,6 +5090,8 @@ function enhanceEventEditorSurface(window, cleanups) {
     }
     itemFrame = null;
   });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  bindItemFrame();
 }
 
 function enhanceEventSummarySurface(window, cleanups) {
@@ -3424,13 +5118,6 @@ function enhanceEventSummarySurface(window, cleanups) {
   };
 
   const dialogObserver = new window.MutationObserver(scheduleAfterNativeLoad);
-  if (dialog) {
-    dialogObserver.observe(dialog, {
-      attributes: true,
-      attributeFilter: ["class"],
-    });
-  }
-
   const onStatusTransitionEnd = event => {
     if (!statusNotifications?.contains(event.target)) {
       return;
@@ -3445,6 +5132,19 @@ function enhanceEventSummarySurface(window, cleanups) {
     }
     geometry.schedule(0, true);
   };
+  cleanups.push(() => {
+    dialogObserver.disconnect();
+    window.removeEventListener("transitionend", onStatusTransitionEnd);
+    if (fallbackTimer) {
+      window.clearTimeout(fallbackTimer);
+    }
+  });
+  if (dialog) {
+    dialogObserver.observe(dialog, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  }
   window.addEventListener("transitionend", onStatusTransitionEnd);
 
   scheduleAfterNativeLoad();
@@ -3455,13 +5155,6 @@ function enhanceEventSummarySurface(window, cleanups) {
     geometry.schedule(0, true);
   }, 750);
 
-  cleanups.push(() => {
-    dialogObserver.disconnect();
-    window.removeEventListener("transitionend", onStatusTransitionEnd);
-    if (fallbackTimer) {
-      window.clearTimeout(fallbackTimer);
-    }
-  });
 }
 
 function enhanceEditorSurfaceWindow(window) {
@@ -3469,6 +5162,7 @@ function enhanceEditorSurfaceWindow(window) {
   if (
     editorSurfaceState.has(window) ||
     (url !== COMPOSE_WINDOW_URL &&
+      url !== SPELL_CHECK_DIALOG_WINDOW_URL &&
       url !== EVENT_DIALOG_WINDOW_URL &&
       url !== EVENT_ATTENDEES_DIALOG_WINDOW_URL &&
       url !== EVENT_SUMMARY_DIALOG_WINDOW_URL)
@@ -3476,9 +5170,14 @@ function enhanceEditorSurfaceWindow(window) {
     return editorSurfaceState.has(window);
   }
 
-  const cleanups = [];
+  const state = { cleanups: [] };
+  editorSurfaceState.set(window, state);
+  enhancedEditorSurfaceWindows.add(window);
+  const { cleanups } = state;
   if (url === COMPOSE_WINDOW_URL) {
     enhanceComposeEditorSurface(window, cleanups);
+  } else if (url === SPELL_CHECK_DIALOG_WINDOW_URL) {
+    enhanceSpellCheckDialogSurface(window, cleanups);
   } else if (url === EVENT_DIALOG_WINDOW_URL) {
     enhanceEventEditorSurface(window, cleanups);
   } else if (url === EVENT_ATTENDEES_DIALOG_WINDOW_URL) {
@@ -3487,8 +5186,6 @@ function enhanceEditorSurfaceWindow(window) {
     enhanceEventSummarySurface(window, cleanups);
   }
 
-  editorSurfaceState.set(window, { cleanups });
-  enhancedEditorSurfaceWindows.add(window);
   return true;
 }
 
@@ -3519,21 +5216,29 @@ function installEditorSurfaceEnhancement() {
     return true;
   }
 
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "an editor surface window",
+      window,
+      enhanceEditorSurfaceWindow,
+      removeEditorSurfaceWindow
+    );
   ExtensionSupport.registerWindowListener(EDITOR_SURFACE_LISTENER_ID, {
     chromeURLs: [
       COMPOSE_WINDOW_URL,
+      SPELL_CHECK_DIALOG_WINDOW_URL,
       EVENT_DIALOG_WINDOW_URL,
       EVENT_ATTENDEES_DIALOG_WINDOW_URL,
       EVENT_SUMMARY_DIALOG_WINDOW_URL,
     ],
-    onLoadWindow: enhanceEditorSurfaceWindow,
+    onLoadWindow: enhanceWindow,
     onUnloadWindow: removeEditorSurfaceWindow,
   });
   editorSurfaceListenerRegistered = true;
 
   const windows = Services.wm.getEnumerator(null);
   while (windows.hasMoreElements()) {
-    enhanceEditorSurfaceWindow(windows.getNext());
+    enhanceWindow(windows.getNext());
   }
   return true;
 }
@@ -3563,7 +5268,6 @@ function enhanceReminderDialog(window) {
     });
   };
   const observer = new window.MutationObserver(scheduleDecoration);
-  observer.observe(richlist, { childList: true, subtree: true });
 
   /* A physical double-click emits two click events before dblclick. The
    * native Details label handles each click, so suppress only its repeated
@@ -3581,7 +5285,6 @@ function enhanceReminderDialog(window) {
     event.preventDefault();
     event.stopImmediatePropagation();
   };
-  richlist.addEventListener("click", onRepeatedDetailsClick, true);
 
   const onDoubleClick = event => {
     if (event.button !== 0 || event.defaultPrevented) {
@@ -3639,8 +5342,6 @@ function enhanceReminderDialog(window) {
     event.preventDefault();
     event.stopPropagation();
   };
-  richlist.addEventListener("dblclick", onDoubleClick);
-
   reminderDialogState.set(window, {
     richlist,
     observer,
@@ -3653,6 +5354,10 @@ function enhanceReminderDialog(window) {
     },
   });
   enhancedReminderDialogWindows.add(window);
+
+  observer.observe(richlist, { childList: true, subtree: true });
+  richlist.addEventListener("click", onRepeatedDetailsClick, true);
+  richlist.addEventListener("dblclick", onDoubleClick);
   root.setAttribute("data-outlook-style-reminder", "true");
   scheduleDecoration();
   return true;
@@ -3690,24 +5395,28 @@ function installReminderDialogEnhancement() {
     return true;
   }
 
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "a reminder dialog",
+      window,
+      enhanceReminderDialog,
+      removeReminderDialogEnhancement
+    );
   ExtensionSupport.registerWindowListener(REMINDER_DIALOG_LISTENER_ID, {
     chromeURLs: [REMINDER_DIALOG_WINDOW_URL],
-    onLoadWindow: enhanceReminderDialog,
+    onLoadWindow: enhanceWindow,
     onUnloadWindow: removeReminderDialogEnhancement,
   });
   reminderDialogListenerRegistered = true;
 
   const windows = Services.wm.getEnumerator("Calendar:AlarmWindow");
   while (windows.hasMoreElements()) {
-    const window = windows.getNext();
-    if (window.document?.location?.href === REMINDER_DIALOG_WINDOW_URL) {
-      enhanceReminderDialog(window);
-    }
+    enhanceWindow(windows.getNext());
   }
   return true;
 }
 
-function centerCalendarChooser(window) {
+function centerWindowOverOpener(window) {
   if (window.closed) {
     return;
   }
@@ -3914,11 +5623,6 @@ function enhanceCalendarChooser(window) {
     schedulePlacement: null,
   };
 
-  window.document.documentElement?.setAttribute(
-    "data-outlook-style-calendar-chooser",
-    "true"
-  );
-
   const clearScheduledPlacement = () => {
     if (state.startTimer) {
       window.clearTimeout(state.startTimer);
@@ -3952,11 +5656,11 @@ function enhanceCalendarChooser(window) {
         state.firstFrame = 0;
         state.secondFrame = window.requestAnimationFrame(() => {
           state.secondFrame = 0;
-          centerCalendarChooser(window);
+          centerWindowOverOpener(window);
           void maybeAcceptDefaultInvitationCalendar(window, state);
           state.settleTimer = window.setTimeout(() => {
             state.settleTimer = 0;
-            centerCalendarChooser(window);
+            centerWindowOverOpener(window);
             void maybeAcceptDefaultInvitationCalendar(window, state);
           }, 150);
         });
@@ -3964,9 +5668,14 @@ function enhanceCalendarChooser(window) {
     }, 0);
   };
 
-  window.addEventListener("resize", state.schedulePlacement);
   calendarChooserState.set(window, state);
   enhancedCalendarChooserWindows.add(window);
+
+  window.document.documentElement?.setAttribute(
+    "data-outlook-style-calendar-chooser",
+    "true"
+  );
+  window.addEventListener("resize", state.schedulePlacement);
   state.schedulePlacement();
   return true;
 }
@@ -4002,19 +5711,23 @@ function installCalendarChooserEnhancement() {
     return true;
   }
 
+  const enhanceWindow = window =>
+    enhanceWindowSafely(
+      "a calendar chooser",
+      window,
+      enhanceCalendarChooser,
+      removeCalendarChooserEnhancement
+    );
   ExtensionSupport.registerWindowListener(CALENDAR_CHOOSER_LISTENER_ID, {
     chromeURLs: [CALENDAR_CHOOSER_WINDOW_URL],
-    onLoadWindow: enhanceCalendarChooser,
+    onLoadWindow: enhanceWindow,
     onUnloadWindow: removeCalendarChooserEnhancement,
   });
   calendarChooserListenerRegistered = true;
 
   const windows = Services.wm.getEnumerator(null);
   while (windows.hasMoreElements()) {
-    const window = windows.getNext();
-    if (window.document?.location?.href === CALENDAR_CHOOSER_WINDOW_URL) {
-      enhanceCalendarChooser(window);
-    }
+    enhanceWindow(windows.getNext());
   }
   return true;
 }
@@ -4024,47 +5737,115 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
     if (isAppShutdown) {
       return;
     }
-    for (const window of [...enhancedTodayPaneWindows]) {
-      removeTodayPaneEnhancement(window);
-    }
-    if (todayPaneListenerRegistered) {
-      ExtensionSupport.unregisterWindowListener(TODAY_PANE_LISTENER_ID);
-      todayPaneListenerRegistered = false;
-    }
-    for (const window of [...enhancedMainPaneSchemeWindows]) {
-      removeMainPaneSchemeBridge(window);
-    }
-    if (mainPaneSchemeListenerRegistered) {
-      ExtensionSupport.unregisterWindowListener(
-        MAIN_PANE_SCHEME_LISTENER_ID
+    const cleanup = (description, callback) => {
+      try {
+        callback();
+      } catch (error) {
+        console.error(
+          `Outlook Style Companion could not clean up ${description}:`,
+          error
+        );
+      }
+    };
+
+    try {
+      for (const window of [...enhancedTodayPaneWindows]) {
+        cleanup("a Today pane window", () =>
+          removeTodayPaneEnhancement(window)
+        );
+      }
+      if (todayPaneListenerRegistered) {
+        cleanup("the Today pane listener", () =>
+          ExtensionSupport.unregisterWindowListener(TODAY_PANE_LISTENER_ID)
+        );
+        todayPaneListenerRegistered = false;
+      }
+
+      for (const window of [...enhancedMessageDisplayWindows]) {
+        cleanup("a message display window", () =>
+          removeMessageDisplaySurfaceBridge(window)
+        );
+      }
+      if (messageDisplaySurfaceListenerRegistered) {
+        cleanup("the message display listener", () =>
+          ExtensionSupport.unregisterWindowListener(
+            MESSAGE_DISPLAY_SURFACE_LISTENER_ID
+          )
+        );
+        messageDisplaySurfaceListenerRegistered = false;
+      }
+
+      for (const window of [...enhancedMainPaneSchemeWindows]) {
+        cleanup("a main-pane scheme window", () =>
+          removeMainPaneSchemeBridge(window)
+        );
+      }
+      if (mainPaneSchemeListenerRegistered) {
+        cleanup("the main-pane scheme listener", () =>
+          ExtensionSupport.unregisterWindowListener(
+            MAIN_PANE_SCHEME_LISTENER_ID
+          )
+        );
+        mainPaneSchemeListenerRegistered = false;
+      }
+
+      for (const conversationView of [...guardedConversationViews]) {
+        cleanup("a guarded conversation", () =>
+          retireGuardedConversationWithFallback(conversationView)
+        );
+      }
+      for (const about3Pane of [...conversationSelectionCapturePanes]) {
+        cleanup("a conversation selection listener", () =>
+          removeConversationSelectionCapture(about3Pane)
+        );
+      }
+
+      for (const window of [...enhancedReminderDialogWindows]) {
+        cleanup("a reminder dialog", () =>
+          removeReminderDialogEnhancement(window)
+        );
+      }
+      if (reminderDialogListenerRegistered) {
+        cleanup("the reminder dialog listener", () =>
+          ExtensionSupport.unregisterWindowListener(
+            REMINDER_DIALOG_LISTENER_ID
+          )
+        );
+        reminderDialogListenerRegistered = false;
+      }
+
+      for (const window of [...enhancedEditorSurfaceWindows]) {
+        cleanup("an editor surface window", () =>
+          removeEditorSurfaceWindow(window)
+        );
+      }
+      if (editorSurfaceListenerRegistered) {
+        cleanup("the editor surface listener", () =>
+          ExtensionSupport.unregisterWindowListener(EDITOR_SURFACE_LISTENER_ID)
+        );
+        editorSurfaceListenerRegistered = false;
+      }
+
+      for (const window of [...enhancedCalendarChooserWindows]) {
+        cleanup("a calendar chooser window", () =>
+          removeCalendarChooserEnhancement(window)
+        );
+      }
+      if (calendarChooserListenerRegistered) {
+        cleanup("the calendar chooser listener", () =>
+          ExtensionSupport.unregisterWindowListener(
+            CALENDAR_CHOOSER_LISTENER_ID
+          )
+        );
+        calendarChooserListenerRegistered = false;
+      }
+    } finally {
+      /* Experiment implementation scripts are cached outside the WebExtension
+       * lifecycle. Invalidate that cache after a disable, uninstall, or update
+       * even if a concurrently destroyed window could not be cleaned fully. */
+      cleanup("the privileged implementation cache", () =>
+        Services.obs.notifyObservers(null, "startupcache-invalidate")
       );
-      mainPaneSchemeListenerRegistered = false;
-    }
-    for (const conversationView of [...guardedConversationViews]) {
-      retireGuardedConversationWithFallback(conversationView);
-    }
-    for (const window of [...enhancedReminderDialogWindows]) {
-      removeReminderDialogEnhancement(window);
-    }
-    if (reminderDialogListenerRegistered) {
-      ExtensionSupport.unregisterWindowListener(REMINDER_DIALOG_LISTENER_ID);
-      reminderDialogListenerRegistered = false;
-    }
-    for (const window of [...enhancedEditorSurfaceWindows]) {
-      removeEditorSurfaceWindow(window);
-    }
-    if (editorSurfaceListenerRegistered) {
-      ExtensionSupport.unregisterWindowListener(EDITOR_SURFACE_LISTENER_ID);
-      editorSurfaceListenerRegistered = false;
-    }
-    for (const window of [...enhancedCalendarChooserWindows]) {
-      removeCalendarChooserEnhancement(window);
-    }
-    if (calendarChooserListenerRegistered) {
-      ExtensionSupport.unregisterWindowListener(
-        CALENDAR_CHOOSER_LISTENER_ID
-      );
-      calendarChooserListenerRegistered = false;
     }
   }
 
@@ -4072,9 +5853,24 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
     return {
       outlookThreadView: {
         async installTodayPane() {
-          const schemeBridgeInstalled = installMainPaneSchemeEnhancement();
-          const todayPaneInstalled = installTodayPaneEnhancement();
-          return schemeBridgeInstalled && todayPaneInstalled;
+          const schemeBridgeInstalled = runEnhancementStep(
+            "the main-pane scheme listener",
+            installMainPaneSchemeEnhancement
+          );
+          const messageDisplayInstalled =
+            runEnhancementStep(
+              "the message display listener",
+              installMessageDisplaySurfaceEnhancement
+            );
+          const todayPaneInstalled = runEnhancementStep(
+            "the Today pane listener",
+            installTodayPaneEnhancement
+          );
+          return (
+            schemeBridgeInstalled &&
+            messageDisplayInstalled &&
+            todayPaneInstalled
+          );
         },
 
         async installReminderDialog() {
@@ -4101,197 +5897,10 @@ var outlookThreadView = class extends ExtensionCommon.ExtensionAPI {
           }
 
           await about3Pane.hasDOMContentLoaded?.promise;
-
-          /* Retry until an active vertical mail layout is measurable. Once it
-           * succeeds, the versioned preference makes this a permanent no-op. */
-          maybeApplyOutlookPaneWidths(about3Pane);
-
-          const dbView = about3Pane.gDBView;
-          const threadTree = about3Pane.threadTree;
-          const messagePane = about3Pane.document.querySelector("message-pane");
-          const selectedIndex = threadTree?.selectedIndex ?? -1;
-          const ownedConversationView = messagePane?.querySelector(
-            `:scope > conversation-view[${OWNED_CONVERSATION_ATTRIBUTE}="true"]`
-          );
-
-          /* Thunderbird's legacy multi-message branch does not clear a native
-           * conversation host. Remove only the host created for our previous
-           * expanded parent before any non-target selection can leave it over
-           * a collapsed-thread or multi-selection summary. Respect a user's
-           * independently enabled native conversation view. */
-          const retireOwnedConversation = () => {
-            if (
-              ownedConversationView &&
-              !Services.prefs.getBoolPref(CONVERSATION_VIEW_PREF, false)
-            ) {
-              retireConversationView(messagePane, ownedConversationView);
-            }
-          };
-
-          /* A collapsed thread already counts all of its messages as selected
-           * and is summarized natively. The one/one condition isolates an
-           * expanded parent while preserving one visibly selected row. */
-          if (
-            !dbView ||
-            !messagePane ||
-            selectedIndex < 0 ||
-            dbView.selection?.count !== 1 ||
-            dbView.numSelected !== 1 ||
-            !dbView.isContainer(selectedIndex)
-          ) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          const MSG_VIEW_FLAG_DUMMY = 0x20000000;
-          if (dbView.getFlagsAt(selectedIndex) & MSG_VIEW_FLAG_DUMMY) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          const thread = dbView.getThreadContainingIndex(selectedIndex);
-          if (!thread || thread.numChildren < 2) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          const selectedMessage = dbView.getMsgHdrAt(selectedIndex);
-          const rootMessage = thread.getRootHdr();
-          if (
-            selectedMessage?.messageKey !== rootMessage?.messageKey ||
-            selectedMessage?.folder?.URI !== rootMessage?.folder?.URI
-          ) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          const messages = [];
-          for (let index = 0; index < thread.numChildren; index++) {
-            messages.push(thread.getChildHdrAt(index));
-          }
-
-          /* Thunderbird's legacy multi-message summary permanently truncates
-           * every message to a short snippet. Prefer its native conversation
-           * accordion, which lazy-loads the complete message in an embedded
-           * about:message reader when a compact row is activated. Gloda owns
-           * that view's thread membership, so do not replace the already-full
-           * parent message unless every visible member is safely indexed. */
-          let canUseConversationView = false;
-          try {
-            if (
-              Services.prefs.getBoolPref(GLOBAL_INDEXER_PREF, true) &&
-              about3Pane.document.getElementById(
-                "conversationViewTemplate"
-              ) &&
-              about3Pane.document.getElementById(
-                "conversationViewMessageBrowserTemplate"
-              )
-            ) {
-              const { Gloda } = ChromeUtils.importESModule(
-                "resource:///modules/gloda/GlodaPublic.sys.mjs"
-              );
-              canUseConversationView = messages.every(message =>
-                Gloda.isMessageIndexed(message)
-              );
-            }
-          } catch (error) {
-            /* Unsupported folders and an index being rebuilt are safe
-             * fallbacks: keep Thunderbird's full single-message reader. */
-            canUseConversationView = false;
-          }
-
-          if (!canUseConversationView) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          /* If the user has enabled Thunderbird's own conversation feature,
-           * its selection pipeline already owns rendering and preference
-           * semantics. Do not replace/reuse that native host or layer a second
-           * asynchronous Gloda request on top of it. */
-          const userConversationViewEnabled =
-            Services.prefs.getBoolPref(CONVERSATION_VIEW_PREF, false);
-          if (userConversationViewEnabled) {
-            ownedConversationView?.removeAttribute(
-              OWNED_CONVERSATION_ATTRIBUTE
-            );
-            removeConversationGuard(ownedConversationView);
-            return false;
-          }
-
-          /* Revalidate after collecting the headers in case the user moved to
-           * another message while the event crossed the extension boundary. */
-          if (
-            about3Pane.gDBView !== dbView ||
-            threadTree.selectedIndex !== selectedIndex ||
-            dbView.selection?.count !== 1 ||
-            dbView.numSelected !== 1 ||
-            !sameMessage(dbView.getMsgHdrAt(selectedIndex), rootMessage)
-          ) {
-            retireOwnedConversation();
-            return false;
-          }
-
-          /* The native accordion is still pref-gated in Thunderbird 153.
-           * Enable it only for this synchronous display call and restore the
-           * user's preference immediately, so the Companion does not leave a
-           * hidden global setting behind or alter unrelated selections. */
-          const hadConversationUserValue =
-            Services.prefs.prefHasUserValue(CONVERSATION_VIEW_PREF);
-          const previousConversationValue = Services.prefs.getBoolPref(
-            CONVERSATION_VIEW_PREF,
-            false
-          );
-          if (previousConversationValue) {
-            return false;
-          }
-          /* Host identity is the request-generation boundary. Thunderbird 153
-           * does not cancel a conversation's async Gloda, snippet, or MsgLoaded
-           * callbacks, so never reuse a host from an earlier root selection. */
-          retireConversationView(
-            messagePane,
-            messagePane.querySelector(":scope > conversation-view")
-          );
-          const shouldRestoreConversationPref =
-            !previousConversationValue || !hadConversationUserValue;
-          if (!previousConversationValue) {
-            Services.prefs.setBoolPref(CONVERSATION_VIEW_PREF, true);
-          }
-          try {
-            messagePane.displayMessages(messages);
-            const conversationView = messagePane.querySelector(
-              ":scope > conversation-view"
-            );
-            conversationView?.setAttribute(
-              OWNED_CONVERSATION_ATTRIBUTE,
-              "true"
-            );
-            if (
-              !guardConversationView(
-                about3Pane,
-                messagePane,
-                conversationView,
-                rootMessage
-              )
-            ) {
-              messagePane.displayMessage(
-                rootMessage.folder.getUriForMsg(rootMessage)
-              );
-              return false;
-            }
-          } finally {
-            if (shouldRestoreConversationPref) {
-              if (hadConversationUserValue) {
-                Services.prefs.setBoolPref(
-                  CONVERSATION_VIEW_PREF,
-                  previousConversationValue
-                );
-              } else {
-                Services.prefs.clearUserPref(CONVERSATION_VIEW_PREF);
-              }
-            }
-          }
-          return true;
+          const refreshConversation = () =>
+            refreshConversationForPane(about3Pane);
+          installConversationSelectionCapture(about3Pane, refreshConversation);
+          return refreshConversation();
         },
       },
     };

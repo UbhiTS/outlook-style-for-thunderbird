@@ -1,26 +1,3 @@
-/* v1.0.2-v1.0.5 registered a duplicate CSS-bearing message script. Remove
- * that persisted registration during upgrade; the manifest's guarded JS now
- * owns adaptive message-canvas styling without attempting CSS injection into
- * the native chrome:// thread-summary document. */
-messenger.scripting.messageDisplay
-  .getRegisteredScripts()
-  .then(registered => {
-    if (
-      registered.some(script => script.id === "fluent-mail-light-message-view")
-    ) {
-      return messenger.scripting.messageDisplay.unregisterScripts({
-        ids: ["fluent-mail-light-message-view"],
-      });
-    }
-    return undefined;
-  })
-  .catch(error => {
-    console.error(
-      "Outlook Style Companion could not remove its legacy display script:",
-      error
-    );
-  });
-
 /* Build the direct Calendar / To Do controls and Outlook-style agenda details
  * in Thunderbird's native Today pane. The startup listener guarantees that
  * Thunderbird wakes the MV3 event page after an application restart; the
@@ -71,15 +48,35 @@ function installOutlookEnhancements() {
 messenger.runtime.onStartup.addListener(installOutlookEnhancements);
 installOutlookEnhancements();
 
-/* Thunderbird already summarizes collapsed threads. For an expanded thread,
- * ask the companion API for its native conversation accordion so every compact
- * message can open its complete trusted reader in place. The API revalidates
- * the current selection and leaves child and standalone selections alone. */
-messenger.mailTabs.onSelectedMessagesChanged.addListener(tab => {
-  messenger.outlookThreadView.showParentThread(tab.id).catch(error => {
+/* A restored or reactivated mail tab can already have a selection without
+ * emitting a tree event. Re-evaluate that tab on activation and install the
+ * privileged per-pane selection listener used for subsequent row changes. */
+messenger.tabs.onActivated.addListener(({ tabId }) => {
+  messenger.outlookThreadView.showParentThread(tabId).catch(error => {
     console.error(
-      "Outlook Style Companion could not display the thread conversation:",
+      "Outlook Style Companion could not restore the thread conversation:",
       error
     );
   });
 });
+
+/* Apply the default immediately to an already-active restored tab when the
+ * extension starts or updates, rather than waiting for the next click. */
+messenger.tabs
+  .query({ active: true })
+  .then(tabs => {
+    for (const tab of tabs) {
+      messenger.outlookThreadView.showParentThread(tab.id).catch(error => {
+        console.error(
+          "Outlook Style Companion could not initialize the thread conversation:",
+          error
+        );
+      });
+    }
+  })
+  .catch(error => {
+    console.error(
+      "Outlook Style Companion could not inspect the active mail tab:",
+      error
+    );
+  });

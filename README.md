@@ -1,8 +1,10 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.21**.
+Current package version: **1.0.27**.
 
-An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.0.3 and later**. It follows the operating system's light or dark appearance automatically and uses Outlook-inspired Fluent colors in both modes.
+An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.x**
+(minimum 153.0.3). It follows the operating system's light or dark appearance
+automatically and uses Outlook-inspired Fluent colors in both modes.
 
 The package uses two add-ons:
 
@@ -14,7 +16,7 @@ Together they provide:
 - A Fluent-blue app/search bar and neutral Outlook-style tab strip
 - Coordinated light and dark reading, compose, settings, calendar, and reminder surfaces
 - Compact folder and message-list panes with subtle separators
-- A grid-edge blue rail for unread messages, regular read messages, and an outlined Fluent selection
+- A grid-edge blue rail for unread messages, regular read-message styling, and an outlined Fluent selection
 - Native indented thread guides and an Outlook-like full-message conversation accordion
 - Segoe UI when available, with system-font fallbacks
 - An Outlook-style Spaces application rail
@@ -31,8 +33,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.21.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.21.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.27.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.27.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -45,7 +47,7 @@ Companion 1.0.14 can crash Thunderbird during startup. If it is installed, start
 
 The two packages form one adaptive theme: there is no separate dark-theme file to install. Thunderbird follows the operating system preference through its native `system` color-scheme setting, while Outlook Style supplies matching Fluent light and dark palettes. Changes to the system appearance are reflected without switching add-ons.
 
-For displayed HTML mail, the Companion colors the document canvas and default inherited text, but does not overwrite a sender's explicit body background or foreground. Deliberately authored mail can therefore retain its own appearance instead of being forcibly recolored.
+For displayed HTML mail, the privileged Companion follows each live native reader into its final MIME document and colors only the document canvas and default inherited text. It does not request WebExtension mail-reading or scripting permissions, and it does not overwrite a sender's explicit body background or foreground. Deliberately authored mail can therefore retain its own appearance instead of being forcibly recolored.
 
 To remove the visual theme, open **Add-ons and Themes → Themes**, find **Outlook Style for Thunderbird**, and choose **Disable** or **Remove**. Remove **Outlook Style Companion** from **Extensions** as well if you no longer want its message, thread, Today-pane, and reminder enhancements.
 
@@ -75,14 +77,31 @@ On Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-The script creates matching `.xpi` and `.zip` files in `dist/`, with `manifest.json` at each archive root.
+The package builder supports Windows PowerShell 5.1 or newer. The complete
+release gate also requires `git` and `node` for source-integrity and JavaScript
+syntax checks.
+
+The script creates deterministic, byte-identical `.xpi` and `.zip` files in
+`dist/`, with `manifest.json` at each archive root, and writes
+`dist/SHA256SUMS.txt`. Package entry ordering and timestamps are normalized so
+the same source and toolchain produce the same bytes.
+
+Run the complete local production gate before publishing:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\release-gate.ps1
+```
+
+The gate validates metadata, least privilege, local-only assets, licenses,
+JavaScript syntax, archive contents, checksums, and two-pass reproducibility.
 
 ### GitHub Actions builds
 
 The **Build add-ons** workflow runs on every push, for pull requests targeting
 `main`, and by manual dispatch. It validates both manifests and JavaScript files,
-builds the theme and Companion packages, verifies every archive against its
-source tree, and publishes these workflow artifacts:
+builds the theme and Companion packages twice, requires byte-for-byte
+reproducibility, verifies every archive and checksum against its source tree,
+and publishes these workflow artifacts:
 
 - `outlook-style-for-thunderbird-VERSION.xpi`
 - `outlook-style-for-thunderbird-VERSION.zip`
@@ -93,11 +112,21 @@ source tree, and publishes these workflow artifacts:
 The workflow only uploads Actions artifacts; it never creates or updates GitHub
 Releases or tags. Publish a release manually whenever a build is ready.
 
+See the [production release checklist](docs/RELEASE_CHECKLIST.md) for the clean
+build, testing, integrity, publication, and rollback gates. Security reports and
+data-handling details are documented in [SECURITY.md](SECURITY.md) and
+[PRIVACY.md](PRIVACY.md). Development and review expectations are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Compatibility and limits
 
 - Minimum version: Thunderbird 153.0.3.
-- No maximum version is declared, so later Thunderbird versions can install it.
-- Detailed styling and companion behavior use internal Thunderbird interfaces. A future Thunderbird redesign may require an update.
+- Maximum version: Thunderbird 153.x. A new Thunderbird major version remains
+  blocked until both packages pass clean-install, upgrade, and regression tests
+  on that version.
+- Detailed styling and companion behavior use internal Thunderbird interfaces.
+  A future Thunderbird redesign may require an update, which is why compatibility
+  fails closed at the tested major version.
 - Modern Thunderbird supports lightweight themes, not legacy complete themes. This project can closely reproduce Outlook's colors, density, surfaces, selection, hierarchy, and selected workflows, but it cannot replace Thunderbird with Outlook's Ribbon.
 - The theme follows the operating system's light/dark preference for both application chrome and content. Message authors can still specify deliberate colors in their own HTML.
 - Participant availability still depends on the selected calendar provider. Thunderbird's Google connection uses CalDAV, and Google's CalDAV service does not provide participant free/busy lookup; an empty Scheduling Assistant row can therefore mean either free or unavailable data. A true Google availability pane would require separate Google Calendar API authorization and network access, which this local companion intentionally does not request.
@@ -125,6 +154,59 @@ Use **Scheduling assistant** for optional attendees, rooms,
 resources, roles, and provider-supplied free/busy details. The native dialog is
 now larger, centered, adaptive in light and dark modes, and includes a warning
 that a blank row is ambiguous rather than proof that someone is available.
+
+## Version 1.0.27 exact meeting countdown
+
+- Shows **in 5 mins** through **in 1 min** before the next accepted meeting,
+  and uses **now** only after that meeting has actually started.
+- Gives an accepted meeting within five minutes priority over an older meeting
+  still in progress, then advances automatically on the minute.
+- Adds a full-width current-time line behind the left-aligned pill and gently
+  pulses it during the five-minute approach and first three meeting minutes,
+  with reduced-motion and forced-colors alternatives.
+
+## Version 1.0.26 consistent thread conversations
+
+- Uses the full native conversation accordion for every single selected email
+  thread, whether its row is expanded or collapsed and whether the selected
+  row is the parent or a reply.
+- Opens the newest message when a conversation is collapsed. In an expanded
+  thread, selecting the parent or any reply opens that exact email in full.
+- Keeps every other message available for in-place expansion without changing
+  the selected row in the message list.
+- Avoids Thunderbird's truncated legacy thread summary for indexed threads.
+
+## Version 1.0.25 hollow unanswered meetings
+
+- Shows unanswered invitations with a hollow calendar-colour rail instead of
+  the segmented treatment.
+- Keeps tentative meetings diagonal, accepted or personal meetings solid, and
+  declined or delegated meetings hollow gray.
+
+## Version 1.0.24 compose contacts and spelling
+
+- Keeps **Add to To**, **Add to Cc**, and **Add to Bcc** on one responsive row
+  when the Contacts sidebar is wide enough, then wraps them naturally at
+  narrower widths.
+- Centers Thunderbird's full spell-check window over the message being
+  composed, including after Thunderbird finishes its delayed content sizing.
+- Gives the spell checker coordinated Fluent fields, suggestions, buttons,
+  disabled states, and light, dark, and forced-colors appearances.
+
+## Version 1.0.23 distinct tentative and unanswered meetings
+
+- Introduced separate patterned rails for tentative and unanswered meetings;
+  version 1.0.25 later simplified unanswered meetings to a hollow blue rail.
+- Preserves solid accepted rails and hollow declined/delegated rails across
+  light, dark, and forced-colors modes.
+
+## Version 1.0.22 accurate Up Next meeting
+
+- Keeps the single **Up Next** pill on accepted invitations and meetings you
+  created, instead of unanswered or tentative invitations.
+- An accepted meeting within five minutes takes priority for its exact
+  countdown; otherwise overlapping meetings follow the one that started most
+  recently. The pill advances automatically on the minute.
 
 ## Version 1.0.21 full thread messages
 
@@ -164,7 +246,8 @@ that a blank row is ambiguous rather than proof that someone is available.
 ## Version 1.0.18 meeting-response indicators
 
 - Keeps accepted invitations and personally-created meetings on the existing solid calendar-colour rail.
-- Uses an Outlook-style diagonal rail for invitations awaiting a response and tentatively accepted meetings.
+- Uses a segmented rail for invitations awaiting a response and Outlook's
+  diagonal rail for tentatively accepted meetings.
 - Keeps declined and delegated meetings visible but gives them a muted hollow rail; declined titles are struck through.
 - Adapts the response indicators to light, dark, and forced-colors modes without relying on colour alone.
 
@@ -178,7 +261,9 @@ that a blank row is ambiguous rather than proof that someone is available.
 
 - Opens New Event and New Task in a practical 900 x 840 default window instead of Thunderbird's compact content minimum.
 - Remembers later user resizing and restores the last normal event-window dimensions within the current display.
-- Shows exactly one blue countdown pill above the first active or upcoming timed meeting, excluding ended, all-day, cancelled, declined, and delegated entries.
+- Shows exactly one blue countdown pill above the relevant accepted or
+  personally-created timed meeting, excluding ended, all-day, cancelled, and
+  unaccepted invitations.
 
 ## Version 1.0.15 crash-safe macOS hotfix
 
@@ -190,7 +275,7 @@ that a blank row is ambiguous rather than proof that someone is available.
 
 - Keeps the already-open Inbox, folder pane, message list, reading pane, and thread summary synchronized when macOS switches between Light and Dark appearances.
 - Bridges Thunderbird's live theme state across its nested `about:3pane` and `about:message` documents instead of depending on a stale child media query.
-- Propagates the selected scheme into the displayed-message browser while preserving sender-authored message colors and forced-colors accessibility behavior.
+- Uses the Companion's privileged reader lifecycle to propagate that scheme into the final displayed MIME document while preserving sender-authored message colors and forced-colors accessibility behavior.
 
 ## Version 1.0.13 adaptive theme and editor-window fixes
 
@@ -248,7 +333,8 @@ that a blank row is ambiguous rather than proof that someone is available.
 ## Version 1.0.4 fixes
 
 - Draws the Outlook-blue leading rail for standalone messages, thread parents, and replies.
-- Selecting an expanded thread parent shows the complete thread in Thunderbird's native multi-message reader while keeping only the parent row selected.
+- Introduced parent-thread summaries; version 1.0.26 later replaced the
+  truncated summary with the full native conversation accordion.
 
 ## Earlier fixes
 
