@@ -282,7 +282,21 @@ try {
           backgroundColor: style?.backgroundColor || "",
           backgroundImage: style?.backgroundImage || "",
           border: style?.border || "",
+          childCount: element?.childElementCount || 0,
+          children: Array.from(element?.children || []).map(child => ({
+            className: child.className || "",
+            display: attendeeWindow.getComputedStyle(child).display,
+            height: child.getBoundingClientRect().height,
+            tag: child.localName,
+            value: child.getAttribute("value") || "",
+            width: child.getBoundingClientRect().width,
+          })),
+          height: element?.getBoundingClientRect().height || 0,
+          label: element?.getAttribute("label") || "",
           listStyleImage: style?.listStyleImage || "",
+          shadowText: element?.shadowRoot?.textContent?.trim() || "",
+          text: element?.textContent?.trim() || "",
+          width: element?.getBoundingClientRect().width || 0,
         };
       };
       return {
@@ -318,6 +332,31 @@ try {
           busy: button?.hasAttribute("aria-busy") || false,
           disabled: button?.disabled || false,
           status: status?.textContent || "",
+        };
+      })();
+    `);
+  } else if (action === "exercise-zoom-controls") {
+    result = await execute(`
+      return (async () => {
+        const attendeeWindow = Services.wm.getMostRecentWindow(
+          "Calendar:EventDialog:Attendees"
+        );
+        const document = attendeeWindow?.document;
+        const zoomIn = document?.getElementById("zoom-in-button");
+        const zoomOut = document?.getElementById("zoom-out-button");
+        const grid = document?.getElementById("freebusy-grid-inner");
+        const before = grid?.scrollWidth || 0;
+        zoomIn?.click();
+        await new Promise(resolve => attendeeWindow.setTimeout(resolve, 0));
+        const afterZoomIn = grid?.scrollWidth || 0;
+        zoomOut?.click();
+        await new Promise(resolve => attendeeWindow.setTimeout(resolve, 0));
+        return {
+          afterZoomIn,
+          before,
+          restored: grid?.scrollWidth || 0,
+          zoomInLabel: zoomIn?.getAttribute("label") || "",
+          zoomOutLabel: zoomOut?.getAttribute("label") || "",
         };
       })();
     `);

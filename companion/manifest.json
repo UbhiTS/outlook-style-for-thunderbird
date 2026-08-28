@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Outlook Style Companion",
-  "version": "1.0.53",
+  "version": "1.0.54",
   "author": "Outlook Style for Thunderbird contributors",
   "homepage_url": "https://github.com/UbhiTS/outlook-style-for-thunderbird",
   "description": "Keeps messages aligned with the system color scheme and enhances Outlook-style mail, attendee, calendar, and reminder workflows.",

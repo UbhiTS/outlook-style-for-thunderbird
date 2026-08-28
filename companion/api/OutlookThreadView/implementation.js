@@ -7683,6 +7683,7 @@ function enhanceAttendeeDialogSurface(window, cleanups) {
   let findTimeStatus = null;
   let findTimeGeneration = 0;
   let allDayToggle = null;
+  const zoomButtonSnapshots = new Map();
   cleanups.push(() => {
     findTimeGeneration++;
     allDayToggle?.removeEventListener("command", syncFindTimeButton);
@@ -7690,6 +7691,16 @@ function enhanceAttendeeDialogSurface(window, cleanups) {
     findTimeButton?.remove();
     findTimeStatus?.remove();
     notice?.remove();
+    for (const [button, snapshot] of zoomButtonSnapshots) {
+      for (const [name, value] of snapshot) {
+        if (value === null) {
+          button.removeAttribute(name);
+        } else {
+          button.setAttribute(name, value);
+        }
+      }
+    }
+    zoomButtonSnapshots.clear();
     document.documentElement.removeAttribute(
       "data-outlook-attendee-dialog"
     );
@@ -7700,6 +7711,29 @@ function enhanceAttendeeDialogSurface(window, cleanups) {
   );
   installChildDialogThemeBridge(window, cleanups);
   installAttendeeDialogGeometry(window, cleanups);
+
+  const labelZoomButton = (id, label, description) => {
+    const button = document.getElementById(id);
+    if (!button) {
+      return;
+    }
+    const attributes = [
+      "aria-label",
+      "data-outlook-explicit-zoom",
+      "label",
+      "tooltiptext",
+    ];
+    zoomButtonSnapshots.set(
+      button,
+      new Map(attributes.map(name => [name, button.getAttribute(name)]))
+    );
+    button.setAttribute("data-outlook-explicit-zoom", "true");
+    button.setAttribute("label", label);
+    button.setAttribute("aria-label", description);
+    button.setAttribute("tooltiptext", description);
+  };
+  labelZoomButton("zoom-out-button", "\u2212", "Zoom out");
+  labelZoomButton("zoom-in-button", "+", "Zoom in");
 
   document.getElementById("outlook-style-availability-notice")?.remove();
   notice = document.createElementNS(HTML_NS, "div");
