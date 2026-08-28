@@ -9,7 +9,8 @@ does not create tags or GitHub Releases.
   lifecycle changes.
 - Keep the theme and Companion versions identical and update release notes.
 - Confirm both manifests retain their stable Gecko IDs, least-privilege fields,
-  and the tested Thunderbird minimum and maximum versions.
+  and the tested Thunderbird minimum and maximum versions required by ATN for
+  Experiment add-ons.
 - Run the full gate from the repository root:
 
   ```powershell
@@ -20,8 +21,8 @@ does not create tags or GitHub Releases.
   Thunderbird profile. Exercise light, dark, forced-colors, and reduced-motion
   modes where the changed feature is visible.
 - For privileged behavior, test on every operating system claimed in the release
-  notes. Never widen `strict_max_version` without a clean install and regression
-  pass on that Thunderbird major version.
+  notes. Run clean-install, upgrade, and regression passes before advancing
+  `strict_max_version` for a newly released Thunderbird major version.
 
 ## Build the release candidate
 

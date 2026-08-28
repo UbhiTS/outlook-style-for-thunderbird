@@ -1,9 +1,9 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.27**.
+Current package version: **1.0.52**.
 
-An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153.x**
-(minimum 153.0.3). It follows the operating system's light or dark appearance
+An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153–154**
+(minimum 153.0). It follows the operating system's light or dark appearance
 automatically and uses Outlook-inspired Fluent colors in both modes.
 
 The package uses two add-ons:
@@ -21,7 +21,8 @@ Together they provide:
 - Segoe UI when available, with system-font fallbacks
 - An Outlook-style Spaces application rail
 - An Outlook My Day-inspired Calendar and To Do pane
-- An Outlook-style Guests field and a polished, one-click Scheduling Assistant for events
+- An Outlook-style Guests field and a polished Scheduling Assistant with one-click common-time selection
+- A New Message/New Event split button and full event details after a timed calendar drag
 - A readable adaptive reminder window with an exact **Until meeting starts — time** snooze action
 - A readable adaptive event-details window, opened by either **Details…** or a reminder-row double-click
 
@@ -33,8 +34,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.27.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.27.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.52.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.52.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -86,6 +87,10 @@ The script creates deterministic, byte-identical `.xpi` and `.zip` files in
 `dist/SHA256SUMS.txt`. Package entry ordering and timestamps are normalized so
 the same source and toolchain produce the same bytes.
 
+After each successful direct build, the XPI files, ZIP files, and checksum are
+also copied to `\\ubhinas\Shared\thunderbird`. The checksum is copied last, so
+it identifies a complete remote build set.
+
 Run the complete local production gate before publishing:
 
 ```powershell
@@ -120,13 +125,15 @@ data-handling details are documented in [SECURITY.md](SECURITY.md) and
 
 ## Compatibility and limits
 
-- Minimum version: Thunderbird 153.0.3.
-- Maximum version: Thunderbird 153.x. A new Thunderbird major version remains
-  blocked until both packages pass clean-install, upgrade, and regression tests
-  on that version.
+- Minimum version: Thunderbird 153.0.
+- Maximum version: Thunderbird 154.x. Add-ons using Thunderbird Theme or
+  Extension Experiments are required by ATN validation to declare an upper
+  bound. After each new Thunderbird major passes clean-install, upgrade, and
+  regression testing, this limit can be advanced through the add-on's ATN
+  administration page.
 - Detailed styling and companion behavior use internal Thunderbird interfaces.
-  A future Thunderbird redesign may require an update, which is why compatibility
-  fails closed at the tested major version.
+  A future Thunderbird redesign may therefore require a theme update before its
+  compatibility limit is advanced.
 - Modern Thunderbird supports lightweight themes, not legacy complete themes. This project can closely reproduce Outlook's colors, density, surfaces, selection, hierarchy, and selected workflows, but it cannot replace Thunderbird with Outlook's Ribbon.
 - The theme follows the operating system's light/dark preference for both application chrome and content. Message authors can still specify deliberate colors in their own HTML.
 - Participant availability still depends on the selected calendar provider. Thunderbird's Google connection uses CalDAV, and Google's CalDAV service does not provide participant free/busy lookup; an empty Scheduling Assistant row can therefore mean either free or unavailable data. A true Google availability pane would require separate Google Calendar API authorization and network access, which this local companion intentionally does not request.
@@ -152,8 +159,210 @@ disabled.
 
 Use **Scheduling assistant** for optional attendees, rooms,
 resources, roles, and provider-supplied free/busy details. The native dialog is
-now larger, centered, adaptive in light and dark modes, and includes a warning
-that a blank row is ambiguous rather than proof that someone is available.
+now larger, centered, adaptive in light and dark modes, and uses the same solid,
+hatched, and unavailable status treatments as the calendar. **Find time** checks
+15-minute increments from the selected start onward, preserves the event
+duration, honors Thunderbird's configured work hours and days, and selects the
+first slot within 30 days where every returned participant interval is free or
+tentative. A warning remains because a blank row is ambiguous rather than proof
+that a provider returned availability data.
+
+## Version 1.0.52 calendar creation and scheduling
+
+- Opens the native New Event editor immediately after a timed range is dragged
+  in the day or week calendar instead of committing an unnamed event directly.
+- Adds a real split button beside **New Message** with **New Message** and
+  **New Event** commands, including the equivalent enhancement when Write is
+  present in the unified toolbar.
+- Adds **Find time** to Invite Attendees. It preserves the event duration,
+  searches 15-minute increments during configured work hours and workdays, and
+  selects the first slot within 30 days where returned attendee intervals are
+  free or tentative.
+- Uses solid blue for busy availability, blue diagonal hatching for tentative,
+  and distinct unavailable and unknown treatments throughout Invite Attendees.
+- Replaces Thunderbird's inherited circular font-size zoom artwork with
+  explicit minus and plus controls, and aligns **Guests:** with the other event
+  editor headings.
+- Must be installed as both 1.0.52 packages; the earlier local 1.0.51 build used
+  the same version number as its predecessor and could therefore remain cached
+  during an in-place update.
+
+## Version 1.0.51 full-window event canvas
+
+- Uses the complete height of full event/task windows, expanding Description
+  and Attendees into the available space with independent scrolling while
+  keeping compact mail previews unchanged.
+
+## Version 1.0.50 direct Edit handoff
+
+- Makes **Edit** from the shared Details card open Thunderbird's editable form
+  directly instead of passing through a second read-only card.
+
+## Version 1.0.49 fully styled summary schedule
+
+- Packages the nested availability timeline styles for CSP-restricted event
+  summaries and removes the redundant native footer Edit button when the
+  shared card supplies its own Edit action.
+
+## Version 1.0.48 cross-surface event regression fix
+
+- Moves the shared card rules into the packaged theme so Thunderbird's
+  CSP-restricted summary dialog receives the same layout as mail and editor
+  surfaces instead of displaying unstyled markup.
+- Uses concise local calendar times without repeating the source timezone and
+  labels invitation navigation as **Details** rather than **Edit**.
+- Caps existing-item cards to their useful content height while retaining
+  scrolling for descriptions or long attendee lists.
+
+## Version 1.0.47 live-tested event-card layout
+
+- Keeps shared event/task card rows top-aligned instead of stretching sparse
+  items across a full-height window, and collapses an empty sidebar cleanly.
+- Displays single-day all-day events as one day rather than exposing the
+  exclusive following-day end date used internally by calendar providers.
+- Adds a repeatable live Thunderbird smoke-check harness for create, view,
+  edit, task, invitation, and standalone-window regression checks.
+
+## Version 1.0.46 unified card in full details
+
+- Applies the shared event/task card stylesheet at the native event-details
+  document level, giving the full details/edit view the same card layout as
+  mail preview and standalone message windows.
+
+## Version 1.0.45 Outlook-style invitation commands
+
+- Restyles the native invitation commands as a larger, flat Outlook command
+  bar in both preview and standalone message windows.
+- Keeps Thunderbird's context-sensitive actions intact: new invitations offer
+  Accept, Tentative, and Decline, while already-processed updates correctly
+  offer Details instead.
+
+## Version 1.0.44 standalone invitation consistency
+
+- Applies the shared event card to standalone message windows opened by a
+  double-click, closing the last gap between message preview and full-window
+  invitation views.
+
+## Version 1.0.43 unified event and task view
+
+- Uses one shared read-only event/task card for mail invitations, full event
+  details, and existing Calendar or Tasks items. The card consistently shows
+  item details, availability, attendees, and description where applicable.
+- Keeps Thunderbird's native RSVP, reminder, recurrence, save, and task
+  behavior authoritative. Selecting **Edit** reveals the native editor only
+  when a change is needed; new items still open directly in that editor.
+
+## Version 1.0.42 build artifact publishing
+
+- Copies every successful direct build's XPI files, ZIP files, and checksum to
+  `\\ubhinas\Shared\thunderbird`, verifying each copied artifact's SHA-256
+  hash before publishing the checksum as the final completion marker.
+
+## Version 1.0.41 event availability layout
+
+- Shows the schedule timeline and traffic-light availability signal on both of
+  Thunderbird's invitation layouts, including the classic inline iTIP message
+  display used by existing profiles.
+- Gives the full event-details view a dedicated schedule-and-attendees sidebar,
+  keeping the event information wide while making every attendee visible in a
+  larger scrollable list below the availability signal.
+
+## Version 1.0.40 word-aware mention editing
+
+- Makes an unmodified Backspace remove the mention's complete trailing name
+  segment while preserving its linked email address. Once only the first name
+  remains, Thunderbird's normal character deletion resumes.
+
+## Version 1.0.39 visible keyboard selection
+
+- Correctly stamps the active contact row as `data-active="true"`, making
+  Up/Down movement visible on macOS as well as Windows and Linux.
+- Scrolls the keyboard-selected contact into view when navigating a long list.
+
+## Version 1.0.38 physical keyboard navigation
+
+- Captures real Up/Down keyboard events from Gecko's privileged editor system
+  event group, while retaining the ordinary listener path used by assistive and
+  synthetic input across macOS, Windows, and Linux.
+
+## Version 1.0.37 editable compose mention labels
+
+- Lets the sender shorten a selected mention to a first name or a first and
+  middle name while preserving the contact's underlying `mailto:` address.
+- Keeps autocomplete closed while editing an existing mention label.
+
+## Version 1.0.36 compose mention keyboard focus
+
+- Gives the keyboard-selected contact a high-contrast focus ring that remains
+  obvious in either system appearance.
+
+## Version 1.0.35 compose mention keyboard navigation
+
+- Handles Thunderbird's pre-consumed navigation events and protects the picker
+  selection from the resulting editor selection update, so Up/Down selection is
+  reliable across Windows, macOS, and Linux.
+
+## Version 1.0.34 compose mention interaction
+
+- Gives each contact a compact, two-line picker row and preserves long email
+  addresses with ellipsis rather than clipping or enlarging the popup.
+- Captures navigation keys from the compose editor itself, so Up/Down, Enter,
+  Tab, and Escape reliably control the picker.
+- Inserts a styled `mailto:` hyperlink for each selected mention. This is
+  portable HTML email markup, rather than the plain text used previously.
+- Adds a compact local-calendar timeline directly to meeting invitations and
+  event-detail windows, so the surrounding confirmed meetings are visible
+  before responding.
+- Shows **green** when the time is clear, **red** for an overlapping accepted
+  or personally-created meeting, and **yellow** when a confirmed meeting is
+  within 30 minutes before or after. A neutral state is used when a provider
+  cannot return enough local calendar data to make a reliable call.
+- Uses only Thunderbird's already-synced calendar data; it does not request
+  network access or send calendar details anywhere.
+
+## Version 1.0.33 compose mention attachment
+
+- Supports Thunderbird 154's compose editor, which lacks the `ownerGlobal`
+  property used by the initial mention implementation.
+
+## Version 1.0.32 compose mention picker position
+
+- Opens the compose `@` contact picker immediately below the typed mention,
+  instead of anchoring it below the full-height message editor where it could
+  be off-screen.
+
+## Version 1.0.31 reliable conversation expansion
+
+- Recalculates an expanded conversation card after the nested reader and MIME
+  body finish layout, instead of relying on Thunderbird's one-time height
+  measurement.
+- Includes the Outlook card's wrapper padding and borders and reserves a usable
+  body viewport, preventing short messages with tall recipient headers from
+  appearing header-only.
+- Tracks later header, notification, attachment, and message-body size changes
+  while the card remains open, with full cleanup when switching messages.
+
+## Version 1.0.30 Thunderbird 154 compatibility
+
+- Keeps the Thunderbird 153.0 minimum and raises the tested maximum to 154.x.
+- Retains the `strict_max_version` required by ATN for Theme and Extension
+  Experiments, while allowing future compatibility bumps through ATN after
+  testing each Thunderbird major.
+
+## Version 1.0.29 compose mentions and Spaces order
+
+- Typing **@** in the body of a new message or reply now opens an address-book
+  contact picker. Keep typing to narrow the list; use the arrow keys and
+  Enter or Tab to insert a contact mention.
+- Orders the left Spaces rail as **Mail**, **Calendar**, **Contacts**,
+  **Tasks**, and **Chat**.
+
+## Version 1.0.28 ATN compatibility
+
+- Uses the Thunderbird Add-ons catalog's recognized 153.0 minimum version so
+  both packages can pass catalog validation.
+- Retains the strict 153.x maximum and makes no product-behavior or add-on-ID
+  changes.
 
 ## Version 1.0.27 production hardening
 

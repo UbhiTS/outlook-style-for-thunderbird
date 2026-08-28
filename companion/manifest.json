@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Outlook Style Companion",
-  "version": "1.0.27",
+  "version": "1.0.52",
   "author": "Outlook Style for Thunderbird contributors",
   "homepage_url": "https://github.com/UbhiTS/outlook-style-for-thunderbird",
   "description": "Keeps messages aligned with the system color scheme and enhances Outlook-style mail, attendee, calendar, and reminder workflows.",
   "browser_specific_settings": {
     "gecko": {
       "id": "fluent-mail-light-message-view@local",
-      "strict_min_version": "153.0.3",
-      "strict_max_version": "153.*"
+      "strict_min_version": "153.0",
+      "strict_max_version": "154.*"
     }
   },
   "icons": {

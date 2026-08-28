@@ -1,0 +1,40 @@
+From: Outlook Style Test <organizer@example.com>
+To: invitee@example.com
+Subject: Invitation: Outlook Style live UI verification
+Date: Thu, 27 Aug 2026 15:30:00 -0700
+Message-ID: <outlook-style-live-ui-20260827@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="outlook-style-live-boundary"
+
+--outlook-style-live-boundary
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+Temporary invitation used to verify Outlook Style meeting views. Nothing is saved to a calendar.
+
+--outlook-style-live-boundary
+Content-Type: text/calendar; method=REQUEST; charset=UTF-8
+Content-Transfer-Encoding: 7bit
+
+BEGIN:VCALENDAR
+PRODID:-//Outlook Style Companion//Live UI Check//EN
+VERSION:2.0
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:outlook-style-live-ui-20260827@example.com
+DTSTAMP:20260827T223000Z
+DTSTART:20260828T170000Z
+DTEND:20260828T180000Z
+SUMMARY:Outlook Style live UI verification
+LOCATION:Test Room
+DESCRIPTION:Temporary unsaved invitation used for visual and code regression checks.
+ORGANIZER;CN=Outlook Style Test:mailto:organizer@example.com
+ATTENDEE;CN=Test Invitee;RSVP=TRUE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:invitee@example.com
+ATTENDEE;CN=Example Attendee;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:attendee@example.com
+STATUS:CONFIRMED
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR
+
+--outlook-style-live-boundary--

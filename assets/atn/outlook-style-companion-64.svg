@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Outlook Style Companion">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0F6CBD"/>
+  <path d="M13 17h38a5 5 0 0 1 5 5v24a5 5 0 0 1-5 5H13a5 5 0 0 1-5-5V22a5 5 0 0 1 5-5Z" fill="#FFFFFF"/>
+  <path d="m10.5 21 18.4 14.6a5 5 0 0 0 6.2 0L53.5 21" fill="none" stroke="#0F548C" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9.8 48.2 25 35.4m29.2 12.8L39 35.4" fill="none" stroke="#CFE4FA" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="48" cy="48" r="12.5" fill="#292929" stroke="#FFFFFF" stroke-width="2.5"/>
+  <path d="M48 40.2v3m0 9.6v3m7.8-7.8h-3M43.2 48h-3m13.3-5.5-2.1 2.1m-6.8 6.8-2.1 2.1m11 0-2.1-2.1m-6.8-6.8-2.1-2.1" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="48" cy="48" r="4.3" fill="#479EF5" stroke="#FFFFFF" stroke-width="2"/>
+</svg>

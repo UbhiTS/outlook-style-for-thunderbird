@@ -245,6 +245,72 @@
   min-block-size: 44px !important;
 }
 
+/* Keep New Message as the primary action and add a compact split-button menu
+ * for New Message/New Event without replacing Thunderbird's customizable
+ * toolbar item. */
+#messengerWindow
+  #unifiedToolbarContent
+  .live-content.outlook-style-new-item-split {
+  display: inline-flex !important;
+  align-items: stretch !important;
+  border-radius: var(--fluent-radius-small) !important;
+}
+
+#messengerWindow
+  #unifiedToolbarContent
+  .outlook-style-new-item-split
+  > .unified-toolbar-button {
+  border-start-end-radius: 0 !important;
+  border-end-end-radius: 0 !important;
+}
+
+#messengerWindow
+  #unifiedToolbarContent
+  .outlook-style-new-item-dropdown {
+  appearance: none !important;
+  position: relative !important;
+  box-sizing: border-box !important;
+  inline-size: 26px !important;
+  min-inline-size: 26px !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-inline-start: 1px solid
+    color-mix(in srgb, currentColor 28%, transparent) !important;
+  border-start-end-radius: var(--fluent-radius-small) !important;
+  border-end-end-radius: var(--fluent-radius-small) !important;
+  padding: 0 !important;
+  background: transparent !important;
+  color: var(--outlook-appbar-text) !important;
+  -moz-window-dragging: no-drag !important;
+}
+
+#messengerWindow
+  #unifiedToolbarContent
+  .outlook-style-new-item-dropdown::before {
+  content: "" !important;
+  position: absolute !important;
+  inset-block-start: 50% !important;
+  inset-inline-start: 50% !important;
+  inline-size: 6px !important;
+  block-size: 6px !important;
+  border-inline-end: 1.5px solid currentColor !important;
+  border-block-end: 1.5px solid currentColor !important;
+  transform: translate(-50%, -65%) rotate(45deg) !important;
+}
+
+#messengerWindow
+  #unifiedToolbarContent
+  .outlook-style-new-item-dropdown:is(:hover, [aria-expanded="true"]) {
+  background: var(--outlook-appbar-hover) !important;
+}
+
+#messengerWindow
+  #unifiedToolbarContent
+  .outlook-style-new-item-dropdown:focus-visible {
+  outline: 2px solid var(--outlook-appbar-text) !important;
+  outline-offset: -2px !important;
+}
+
 #messengerWindow search-bar,
 #messengerWindow .search-bar {
   color-scheme: light dark !important;
@@ -318,6 +384,33 @@
   box-shadow: inset 3px 0 0 var(--outlook-accent) !important;
 }
 
+/* Keep the Outlook application rail in the requested working order. Settings
+ * and extension spaces remain in Thunderbird's separate lower section. */
+#messengerWindow #spacesToolbar :is(#mailButton, #calendarButton,
+    #addressBookButton, #tasksButton, #chatButton) {
+  order: 0 !important;
+}
+
+#messengerWindow #spacesToolbar #mailButton {
+  order: 1 !important;
+}
+
+#messengerWindow #spacesToolbar #calendarButton {
+  order: 2 !important;
+}
+
+#messengerWindow #spacesToolbar #addressBookButton {
+  order: 3 !important;
+}
+
+#messengerWindow #spacesToolbar #tasksButton {
+  order: 4 !important;
+}
+
+#messengerWindow #spacesToolbar #chatButton {
+  order: 5 !important;
+}
+
 #messengerWindow #status-bar,
 #msgcomposeWindow #status-bar {
   background: var(--outlook-surface-alt) !important;
@@ -377,6 +470,69 @@
   padding-inline: 8px !important;
   background: var(--outlook-surface-subtle) !important;
   border-block-end: 1px solid var(--outlook-divider) !important;
+}
+
+#paneLayout
+  #folderPaneHeaderBar
+  #folderPaneWriteMessage[data-outlook-style-split-button="true"] {
+  margin-inline-end: 0 !important;
+  border-start-end-radius: 0 !important;
+  border-end-end-radius: 0 !important;
+}
+
+#paneLayout #folderPaneHeaderBar #outlook-style-folder-new-item-dropdown {
+  appearance: none !important;
+  position: relative !important;
+  align-self: center !important;
+  box-sizing: border-box !important;
+  inline-size: 28px !important;
+  min-inline-size: 28px !important;
+  block-size: 30px !important;
+  min-block-size: 30px !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-inline-start: 1px solid
+    color-mix(in srgb, var(--outlook-on-primary) 34%, transparent) !important;
+  border-start-end-radius: var(--fluent-radius-small) !important;
+  border-end-end-radius: var(--fluent-radius-small) !important;
+  padding: 0 !important;
+  background: var(--outlook-primary-fill) !important;
+  color: var(--outlook-on-primary) !important;
+}
+
+#paneLayout
+  #folderPaneHeaderBar
+  #outlook-style-folder-new-item-dropdown::before {
+  content: "" !important;
+  position: absolute !important;
+  inset-block-start: 50% !important;
+  inset-inline-start: 50% !important;
+  inline-size: 6px !important;
+  block-size: 6px !important;
+  border-inline-end: 1.5px solid currentColor !important;
+  border-block-end: 1.5px solid currentColor !important;
+  transform: translate(-50%, -65%) rotate(45deg) !important;
+}
+
+#paneLayout
+  #folderPaneHeaderBar
+  #outlook-style-folder-new-item-dropdown:is(:hover, [aria-expanded="true"]) {
+  background: var(--outlook-primary-fill-hover) !important;
+}
+
+#paneLayout
+  #folderPaneHeaderBar
+  #outlook-style-folder-new-item-dropdown:focus-visible {
+  outline: 2px solid var(--outlook-on-primary) !important;
+  outline-offset: -3px !important;
+}
+
+#paneLayout
+  #folderPaneHeaderBar
+  #outlook-style-folder-new-item-dropdown:has(
+    + #folderPaneWriteMessage[hidden]
+  ) {
+  display: none !important;
 }
 
 #paneLayout #folderTree {
@@ -2012,6 +2168,87 @@
   background: var(--outlook-accent-light, #cfe4fa) !important;
 }
 
+/* Contact suggestions for @ mentions in the compose body. The companion
+ * supplies the popup and always leaves the native recipient autocomplete
+ * untouched. */
+#msgcomposeWindow #outlook-compose-mention-popup {
+  --panel-background: var(--outlook-surface, #ffffff) !important;
+  --panel-color: var(--outlook-text, #242424) !important;
+  --panel-border-color: var(--outlook-divider-strong, #d1d1d1) !important;
+  min-inline-size: 300px !important;
+  max-inline-size: min(420px, calc(100vw - 32px)) !important;
+  padding: 4px !important;
+  background: var(--outlook-surface, #ffffff) !important;
+  color: var(--outlook-text, #242424) !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: var(--fluent-radius-medium, 8px) !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18) !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-list {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+  max-block-size: 280px !important;
+  overflow-y: auto !important;
+  padding: 0 !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-item {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  inline-size: 100% !important;
+  min-block-size: 48px !important;
+  max-block-size: 48px !important;
+  margin: 0 !important;
+  padding: 5px 10px !important;
+  overflow: hidden !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--fluent-radius-small, 4px) !important;
+  background: transparent !important;
+  color: var(--outlook-text, #242424) !important;
+  cursor: pointer !important;
+  font: inherit !important;
+  text-align: start !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-name,
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-email {
+  display: block !important;
+  overflow: hidden !important;
+  text-align: start !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-name {
+  color: inherit !important;
+  font-weight: 600 !important;
+  line-height: 20px !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-email {
+  color: var(--outlook-text-muted, #616161) !important;
+  font-size: 12px !important;
+  line-height: 16px !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-item:is(
+    :hover, [data-active="true"]
+  ) {
+  background: var(--outlook-selection, #ebf3fc) !important;
+  border-color: var(--outlook-accent, #0f6cbd) !important;
+  color: var(--outlook-accent-pressed, #0c3b5e) !important;
+  outline: 2px solid var(--outlook-accent, #0f6cbd) !important;
+  outline-offset: -2px !important;
+}
+
+#msgcomposeWindow #outlook-compose-mention-popup .outlook-compose-mention-empty {
+  display: block !important;
+  padding: 8px 10px !important;
+  color: var(--outlook-text-muted, #616161) !important;
+}
+
 /* The optional contacts panel is loaded into #contactsBrowser as a separate
  * lightweight-theme document. Keep it on adaptive neutral surfaces instead of
  * inheriting the solid app-bar blue, without changing address-book behavior. */
@@ -2488,7 +2725,7 @@
   padding-inline-end: 12px !important;
   color: var(--outlook-text-secondary, #424242) !important;
   font-weight: 400 !important;
-  text-align: end !important;
+  text-align: start !important;
   text-shadow: none !important;
 }
 
@@ -2784,6 +3021,51 @@
   color: var(--outlook-text-secondary, #424242) !important;
 }
 
+:root#calendar-event-dialog-attendees-v2[data-outlook-attendee-dialog="true"]
+  #outlook-style-find-time {
+  min-block-size: 28px !important;
+  margin: 2px 0 !important;
+  padding-inline: 12px !important;
+  border: 1px solid var(--outlook-accent, #0f6cbd) !important;
+  border-radius: var(--fluent-radius-small, 4px) !important;
+  background: var(--outlook-accent, #0f6cbd) !important;
+  color: var(--outlook-on-primary, #ffffff) !important;
+  font-weight: 600 !important;
+  opacity: 1 !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[data-outlook-attendee-dialog="true"]
+  #outlook-style-find-time:not([disabled]):hover {
+  border-color: var(--outlook-accent-hover, #115ea3) !important;
+  background: var(--outlook-accent-hover, #115ea3) !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[data-outlook-attendee-dialog="true"]
+  #outlook-style-find-time:not([disabled]):active {
+  border-color: var(--outlook-accent-pressed, #0c3b5e) !important;
+  background: var(--outlook-accent-pressed, #0c3b5e) !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[data-outlook-attendee-dialog="true"]
+  #outlook-style-find-time[disabled] {
+  border-color: var(--outlook-divider, #e0e0e0) !important;
+  background: var(--outlook-disabled-surface, #f0f0f0) !important;
+  color: var(--outlook-disabled-text, #767676) !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[data-outlook-attendee-dialog="true"]
+  #outlook-style-find-time-status {
+  align-self: center !important;
+  min-inline-size: 0 !important;
+  max-inline-size: min(480px, 45vw) !important;
+  margin-inline: 10px !important;
+  overflow: hidden !important;
+  color: var(--outlook-text-muted, #616161) !important;
+  font-size: 12px !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
 :root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
   :is(#zoom-in-button, #zoom-out-button) {
   min-inline-size: 28px !important;
@@ -2797,6 +3079,16 @@
   fill: currentColor !important;
   stroke: currentColor !important;
   opacity: 1 !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
+  #zoom-in-button {
+  list-style-image: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Cpath d=%22M8 3v10M3 8h10%22 fill=%22none%22 stroke=%22context-stroke%22 stroke-width=%221.5%22 stroke-linecap=%22round%22/%3E%3C/svg%3E") !important;
+}
+
+:root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
+  #zoom-out-button {
+  list-style-image: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Cpath d=%22M3 8h10%22 fill=%22none%22 stroke=%22context-stroke%22 stroke-width=%221.5%22 stroke-linecap=%22round%22/%3E%3C/svg%3E") !important;
 }
 
 :root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
@@ -3049,13 +3341,20 @@
 
 :root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
   :is(.freebusy-row > .busy, .legend[status="BUSY"]) {
-  background-color: var(--outlook-accent-pressed, #0c3b5e) !important;
-  color: var(--outlook-accent-pressed, #0c3b5e) !important;
+  background-color: var(--outlook-accent, #0f6cbd) !important;
+  color: var(--outlook-accent, #0f6cbd) !important;
 }
 
 :root#calendar-event-dialog-attendees-v2[windowtype="Calendar:EventDialog:Attendees"]
   :is(.freebusy-row > .tentative, .legend[status="BUSY_TENTATIVE"]) {
-  background-color: var(--outlook-accent, #0f6cbd) !important;
+  box-sizing: border-box !important;
+  border: 1px solid var(--outlook-accent, #0f6cbd) !important;
+  background-color: var(--outlook-surface, #ffffff) !important;
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--outlook-accent, #0f6cbd) 0 3px,
+    var(--outlook-surface, #ffffff) 3px 6px
+  ) !important;
   color: var(--outlook-accent, #0f6cbd) !important;
 }
 
@@ -3654,6 +3953,404 @@
   background: var(--outlook-selection, #ebf3fc) !important;
 }
 
+/* Shared schedule block. Like the outer Event/Task card below, this must be a
+ * packaged theme rule because the calendar summary dialog rejects runtime
+ * inline styles through CSP. */
+.outlook-style-availability {
+  box-sizing: border-box !important;
+  margin: 16px 0 4px !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: 8px !important;
+  padding: 12px !important;
+  background: var(--outlook-surface-alt, #fafafa) !important;
+  color: var(--outlook-text, #242424) !important;
+  font: 13px/18px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+}
+
+.outlook-style-availability-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+}
+
+.outlook-style-availability-title {
+  margin: 0 !important;
+  color: inherit !important;
+  font: 600 14px/20px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+}
+
+.outlook-style-availability-status {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  flex: 0 0 auto !important;
+  font-weight: 600 !important;
+  white-space: nowrap !important;
+}
+
+.outlook-style-availability-status::before {
+  content: "" !important;
+  inline-size: 10px !important;
+  block-size: 10px !important;
+  border: 1px solid currentColor !important;
+  border-radius: 50% !important;
+  background: currentColor !important;
+}
+
+.outlook-style-availability[data-availability-state="green"]
+  .outlook-style-availability-status {
+  color: #107c10 !important;
+}
+
+.outlook-style-availability[data-availability-state="yellow"]
+  .outlook-style-availability-status {
+  color: #8a6100 !important;
+}
+
+.outlook-style-availability[data-availability-state="red"]
+  .outlook-style-availability-status {
+  color: #c50f1f !important;
+}
+
+.outlook-style-availability[data-availability-state="unknown"]
+  .outlook-style-availability-status {
+  color: var(--outlook-text-muted, #616161) !important;
+}
+
+.outlook-style-availability-summary {
+  margin: 4px 0 0 !important;
+  color: var(--outlook-text-secondary, #424242) !important;
+}
+
+.outlook-style-availability-timeline {
+  position: relative !important;
+  block-size: 58px !important;
+  margin-block: 12px 4px !important;
+  border-block: 1px solid var(--outlook-divider, #e0e0e0) !important;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(25% - 1px),
+    var(--outlook-divider, #e0e0e0) calc(25% - 1px),
+    var(--outlook-divider, #e0e0e0) 25%
+  ) !important;
+}
+
+.outlook-style-availability-block {
+  position: absolute !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  min-inline-size: 4px !important;
+  border-radius: 3px !important;
+  padding: 2px 5px !important;
+  color: #ffffff !important;
+  font-size: 11px !important;
+  line-height: 14px !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.outlook-style-availability-block[data-kind="target"] {
+  inset-block-start: 7px !important;
+  block-size: 20px !important;
+  background: var(--outlook-accent, #0f6cbd) !important;
+}
+
+.outlook-style-availability-block[data-kind="confirmed"] {
+  inset-block-start: 31px !important;
+  block-size: 20px !important;
+  background: #5c5c5c !important;
+}
+
+.outlook-style-availability-block[data-relation="overlap"] {
+  background: #c50f1f !important;
+}
+
+.outlook-style-availability-block[data-relation="nearby"] {
+  background: #8a6100 !important;
+}
+
+.outlook-style-availability-scale {
+  display: flex !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+  color: var(--outlook-text-muted, #616161) !important;
+  font-size: 11px !important;
+}
+
+.outlook-style-availability-events {
+  display: grid !important;
+  gap: 3px !important;
+  margin: 10px 0 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+}
+
+.outlook-style-availability-events[hidden],
+.outlook-style-availability-timeline[hidden],
+.outlook-style-availability-scale[hidden] {
+  display: none !important;
+}
+
+.outlook-style-availability-event {
+  overflow: hidden !important;
+  color: var(--outlook-text-secondary, #424242) !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.outlook-style-availability-event::before {
+  content: "" !important;
+  display: inline-block !important;
+  inline-size: 7px !important;
+  block-size: 7px !important;
+  margin-inline-end: 6px !important;
+  border-radius: 50% !important;
+  background: #5c5c5c !important;
+}
+
+.outlook-style-availability-event[data-relation="overlap"]::before {
+  background: #c50f1f !important;
+}
+
+.outlook-style-availability-event[data-relation="nearby"]::before {
+  background: #8a6100 !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .outlook-style-availability[data-availability-state="green"]
+    .outlook-style-availability-status {
+    color: #6ccb5f !important;
+  }
+
+  .outlook-style-availability[data-availability-state="yellow"]
+    .outlook-style-availability-status {
+    color: #fce100 !important;
+  }
+
+  .outlook-style-availability[data-availability-state="red"]
+    .outlook-style-availability-status {
+    color: #ff99a4 !important;
+  }
+
+  .outlook-style-availability-block[data-kind="confirmed"] {
+    background: #adadad !important;
+    color: #242424 !important;
+  }
+}
+
+/* Shared read-only Event/Task card. The Companion injects the same markup in
+ * mail previews, standalone messages, summaries, and existing item dialogs.
+ * Calendar summary windows block runtime inline styles through CSP, so the
+ * common chrome-document rules must live in the packaged theme stylesheet. */
+.outlook-style-item-view {
+  box-sizing: border-box !important;
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr) !important;
+  align-content: start !important;
+  gap: 18px 24px !important;
+  margin: 12px !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: 10px !important;
+  padding: 20px !important;
+  background: var(--outlook-surface, #ffffff) !important;
+  color: var(--outlook-text, #242424) !important;
+  font: 14px/20px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+}
+
+.outlook-style-item-view-header {
+  grid-column: 1 / -1 !important;
+  display: flex !important;
+  align-items: flex-start !important;
+  justify-content: space-between !important;
+  gap: 16px !important;
+  padding-block-end: 14px !important;
+  border-block-end: 1px solid var(--outlook-divider, #e0e0e0) !important;
+}
+
+.outlook-style-item-view-kind {
+  margin: 0 0 4px !important;
+  color: var(--outlook-text-secondary, #424242) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: uppercase !important;
+}
+
+.outlook-style-item-view-title {
+  margin: 0 !important;
+  color: inherit !important;
+  font: 600 22px/28px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+}
+
+.outlook-style-item-view-edit {
+  flex: 0 0 auto !important;
+  min-block-size: 32px !important;
+  border: 1px solid var(--outlook-primary-fill, #0f6cbd) !important;
+  border-radius: 4px !important;
+  padding: 5px 14px !important;
+  background: var(--outlook-primary-fill, #0f6cbd) !important;
+  color: var(--outlook-on-primary, #ffffff) !important;
+  font: inherit !important;
+  font-weight: 600 !important;
+}
+
+.outlook-style-item-view-edit:hover {
+  background: var(--outlook-primary-fill-hover, #115ea3) !important;
+}
+
+.outlook-style-item-view-details,
+.outlook-style-item-view-sidebar {
+  min-inline-size: 0 !important;
+}
+
+.outlook-style-item-view-fields {
+  display: grid !important;
+  grid-template-columns: max-content minmax(0, 1fr) !important;
+  gap: 7px 14px !important;
+  margin: 0 !important;
+}
+
+.outlook-style-item-view-fields dt {
+  color: var(--outlook-text-secondary, #424242) !important;
+  font-weight: 600 !important;
+}
+
+.outlook-style-item-view-fields dd {
+  min-inline-size: 0 !important;
+  margin: 0 !important;
+  overflow-wrap: anywhere !important;
+}
+
+.outlook-style-item-view-section {
+  margin-block-start: 18px !important;
+}
+
+.outlook-style-item-view-section h3 {
+  margin: 0 0 8px !important;
+  color: inherit !important;
+  font: 600 15px/20px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+}
+
+.outlook-style-item-view-description {
+  max-block-size: 340px !important;
+  margin: 0 !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: 4px !important;
+  padding: 12px !important;
+  overflow: auto !important;
+  background: var(--outlook-surface-alt, #fafafa) !important;
+  color: inherit !important;
+  font: inherit !important;
+  white-space: pre-wrap !important;
+}
+
+.outlook-style-item-view-attendees {
+  display: grid !important;
+  gap: 5px !important;
+  max-block-size: 310px !important;
+  margin: 0 !important;
+  border: 1px solid var(--outlook-divider-strong, #d1d1d1) !important;
+  border-radius: 4px !important;
+  padding: 10px !important;
+  overflow: auto !important;
+  background: var(--outlook-surface-alt, #fafafa) !important;
+  list-style: none !important;
+}
+
+.outlook-style-item-view-attendee {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.outlook-style-item-view-attendee::before {
+  content: "●" !important;
+  margin-inline-end: 7px !important;
+  color: var(--outlook-accent, #0f6cbd) !important;
+}
+
+.outlook-style-item-view .outlook-style-availability {
+  margin: 0 !important;
+}
+
+.outlook-style-item-view-single {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.outlook-style-item-view-single .outlook-style-item-view-sidebar {
+  display: none !important;
+}
+
+/* Full event/task windows use their entire canvas. The header and schedule
+ * remain fixed while Description and Attendees absorb the remaining height
+ * and keep their own scrollbars. Mail previews retain the compact card. */
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view) {
+  flex: 1 1 auto !important;
+  align-self: stretch !important;
+  min-block-size: 0 !important;
+  max-block-size: none !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+  align-content: stretch !important;
+  overflow: hidden !important;
+}
+
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view)
+  :is(.outlook-style-item-view-details, .outlook-style-item-view-sidebar) {
+  display: flex !important;
+  min-block-size: 0 !important;
+  flex-direction: column !important;
+}
+
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view)
+  .outlook-style-item-view-section:has(.outlook-style-item-view-description) {
+  display: flex !important;
+  min-block-size: 0 !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+}
+
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view)
+  .outlook-style-item-view-description {
+  min-block-size: 120px !important;
+  max-block-size: none !important;
+  flex: 1 1 auto !important;
+}
+
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view)
+  .outlook-style-item-view-sidebar
+  .outlook-style-item-view-section:has(.outlook-style-item-view-attendees) {
+  display: flex !important;
+  min-block-size: 0 !important;
+  flex: 1 1 auto !important;
+  flex-direction: column !important;
+}
+
+:is(#outlook-style-summary-item-view, #outlook-style-editor-item-view)
+  .outlook-style-item-view-attendees {
+  min-block-size: 92px !important;
+  max-block-size: none !important;
+  flex: 1 1 auto !important;
+}
+
+@media (max-width: 780px) {
+  .outlook-style-item-view {
+    grid-template-columns: minmax(0, 1fr) !important;
+    margin: 8px !important;
+    padding: 14px !important;
+  }
+
+  .outlook-style-item-view-header {
+    align-items: stretch !important;
+    flex-direction: column !important;
+  }
+
+  .outlook-style-item-view-edit {
+    align-self: flex-start !important;
+  }
+}
+
 /* The read-only event summary opened from a reminder is a separate
  * lightweight-theme window. Keep its chrome, fields, attendees, and
  * notification bar on the same adaptive Fluent surfaces as the reminder.
@@ -3875,6 +4572,133 @@
   :is(#calendar-summary-dialog-edit-button,
       #calendar-summary-dialog-edit-menu-button):hover {
   background: var(--outlook-primary-fill-hover, #115ea3) !important;
+}
+
+/* Invitation commands use the same spacious, flat command-bar language as
+ * Outlook's event window. Thunderbird still decides which commands are valid:
+ * unanswered invitations expose RSVP; an already-processed update exposes
+ * Details instead. */
+:root:is(#messengerWindow, #messageWindow) #imip-bar {
+  box-sizing: border-box !important;
+  min-block-size: 48px !important;
+  margin: 0 !important;
+  border-block: 1px solid var(--outlook-divider, #e0e0e0) !important;
+  padding: 0 10px !important;
+  background: var(--outlook-surface, #ffffff) !important;
+  color: var(--outlook-text-secondary, #424242) !important;
+  text-shadow: none !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-bar > img {
+  inline-size: 20px !important;
+  block-size: 20px !important;
+  margin-inline-end: 8px !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-bar .msgNotificationBarText {
+  color: var(--outlook-text-secondary, #424242) !important;
+  font-size: 14px !important;
+  line-height: 20px !important;
+  text-shadow: none !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbox,
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar {
+  min-block-size: 46px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  color: var(--outlook-text, #242424) !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton {
+  appearance: none !important;
+  box-sizing: border-box !important;
+  min-inline-size: 104px !important;
+  min-block-size: 38px !important;
+  margin: 4px 0 !important;
+  border: 0 !important;
+  border-inline-start: 1px solid var(--outlook-divider, #e0e0e0) !important;
+  border-radius: 0 !important;
+  padding: 0 14px !important;
+  background: transparent !important;
+  color: var(--outlook-text, #242424) !important;
+  fill: currentColor !important;
+  font: 400 16px/22px var(--fluent-font-family, "Segoe UI", sans-serif) !important;
+  text-shadow: none !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton:hover {
+  background: var(--outlook-selection, #ebf3fc) !important;
+  color: var(--outlook-accent-hover, #115ea3) !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton:active {
+  background: var(--outlook-current, #e0e0e0) !important;
+  color: var(--outlook-accent-pressed, #0c3b5e) !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton:first-child {
+  border-inline-start: 0 !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton .toolbarbutton-icon {
+  inline-size: 20px !important;
+  block-size: 20px !important;
+  margin-inline-end: 7px !important;
+}
+
+:root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton .toolbarbutton-text {
+  color: inherit !important;
+}
+
+@media (forced-colors) {
+  .outlook-style-item-view,
+  .outlook-style-item-view-description,
+  .outlook-style-item-view-attendees {
+    border-color: ButtonBorder !important;
+    background: Canvas !important;
+    color: CanvasText !important;
+  }
+
+  .outlook-style-item-view-edit {
+    border-color: Highlight !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  .outlook-style-availability {
+    border-color: ButtonBorder !important;
+    background: Canvas !important;
+    color: CanvasText !important;
+  }
+
+  .outlook-style-availability-status,
+  .outlook-style-availability[data-availability-state]
+    .outlook-style-availability-status {
+    color: CanvasText !important;
+  }
+
+  .outlook-style-availability-block,
+  .outlook-style-availability-event::before {
+    forced-color-adjust: none !important;
+    border: 1px solid CanvasText !important;
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
+
+  :root:is(#messengerWindow, #messageWindow) #imip-bar,
+  :root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton {
+    border-color: ButtonBorder !important;
+    background: Canvas !important;
+    color: CanvasText !important;
+  }
+
+  :root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton:hover,
+  :root:is(#messengerWindow, #messageWindow) #imip-view-toolbar toolbarbutton:active {
+    background: Highlight !important;
+    color: HighlightText !important;
+  }
 }
 
 /* Thunderbird reuses this modal for invitation import, paste, export, and

@@ -12,8 +12,8 @@ $companionManifestPath = Join-Path $companionDir "manifest.json"
 $readmePath = Join-Path $projectRoot "README.md"
 $expectedHomepage = "https://github.com/UbhiTS/outlook-style-for-thunderbird"
 $expectedAuthor = "Outlook Style for Thunderbird contributors"
-$expectedMinVersion = "153.0.3"
-$expectedMaxVersion = "153.*"
+$expectedMinVersion = "153.0"
+$expectedMaxVersion = "154.*"
 $versionPattern = '^\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$'
 
 $errors = [System.Collections.Generic.List[string]]::new()
@@ -93,7 +93,7 @@ foreach ($manifestRecord in @(
     $errors.Add("$($manifestRecord.Name) strict_min_version must be $expectedMinVersion.")
   }
   if ([string]$manifestValue.browser_specific_settings.gecko.strict_max_version -ne $expectedMaxVersion) {
-    $errors.Add("$($manifestRecord.Name) strict_max_version must be $expectedMaxVersion.")
+    $errors.Add("$($manifestRecord.Name) strict_max_version must be $expectedMaxVersion for ATN Experiment validation.")
   }
   if (-not $manifestValue.browser_specific_settings.gecko.id) {
     $errors.Add("$($manifestRecord.Name) Gecko ID is required for permanent installation and safe updates.")

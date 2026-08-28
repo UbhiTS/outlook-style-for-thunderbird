@@ -16,6 +16,9 @@ const { MailServices } = ChromeUtils.importESModule(
 const { MailUtils } = ChromeUtils.importESModule(
   "resource:///modules/MailUtils.sys.mjs"
 );
+const { openLinkExternally } = ChromeUtils.importESModule(
+  "resource:///modules/LinkHelper.sys.mjs"
+);
 const TODAY_PANE_LISTENER_ID = "fluent-mail-outlook-inspired-today-pane";
 const MAIN_PANE_SCHEME_LISTENER_ID =
   "outlook-style-companion-main-pane-scheme";
@@ -88,6 +91,7 @@ const guardedConversationViews = new Set();
 const conversationGuardState = new WeakMap();
 const conversationSelectionCapturePanes = new Set();
 const conversationSelectionCaptureState = new WeakMap();
+const nativeEditorRequestKeys = new Set();
 
 const OUTLOOK_COLOR_SCHEME_ATTRIBUTE = "data-outlook-color-scheme";
 
@@ -488,6 +492,8 @@ function syncDisplayedMimeDocuments(window) {
   }
   const scheme = getOutlookColorScheme(window);
   forEachAboutMessageWindow(window, aboutMessageWindow => {
+    stampOutlookColorScheme(aboutMessageWindow.document, scheme);
+    installInvitationAvailabilitySurface(aboutMessageWindow.document);
     let finalize = false;
     try {
       finalize =
@@ -525,6 +531,11 @@ function installMessageDisplaySurfaceBridge(window) {
       getOutlookColorScheme(window),
       false
     );
+    stampOutlookColorScheme(
+      event.target.document,
+      getOutlookColorScheme(window)
+    );
+    installInvitationAvailabilitySurface(event.target.document);
   };
   const onMsgLoaded = event => {
     if (state.shuttingDown || !isAboutMessageWindow(event.target)) {
@@ -538,6 +549,11 @@ function installMessageDisplaySurfaceBridge(window) {
       getOutlookColorScheme(window),
       true
     );
+    stampOutlookColorScheme(
+      event.target.document,
+      getOutlookColorScheme(window)
+    );
+    installInvitationAvailabilitySurface(event.target.document);
   };
   const syncScheme = () => {
     state.schemeFrame = 0;
@@ -1522,8 +1538,7 @@ function armConversationGuardTimeout(state) {
     state.timeoutId = 0;
     if (
       state.disabled ||
-      state.ready ||
-      !state.conversationView.hidden
+      state.ready
     ) {
       return;
     }
@@ -1565,6 +1580,9 @@ function revealGuardedConversation(state, conversationView) {
     /* The legacy browser can disappear while the mail tab is closing. */
   }
   state.ready = true;
+  conversationView.style.removeProperty("visibility");
+  conversationView.style.removeProperty("pointer-events");
+  conversationView.removeAttribute("aria-hidden");
   conversationView.hidden = false;
 }
 
@@ -1904,10 +1922,14 @@ function guardConversationView(
     targetMessageId: "",
   });
   armConversationGuardTimeout(state);
-  /* Do not paint an asynchronous result until it has been matched to the live
-   * root selection. A correct population unhides the view in the observer's
-   * pre-paint microtask. */
-  conversationView.hidden = true;
+  /* Do not paint or expose an asynchronous result until it has been matched to
+   * the live root selection. Keep the host in layout, however: Thunderbird's
+   * one-shot MsgLoaded handler measures the nested body while this guard is
+   * active, and display:none would make that measurement zero. */
+  conversationView.hidden = false;
+  conversationView.style.setProperty("visibility", "hidden");
+  conversationView.style.setProperty("pointer-events", "none");
+  conversationView.setAttribute("aria-hidden", "true");
   validateGuardedConversation(conversationView);
   return true;
 }
@@ -2209,6 +2231,1487 @@ function stampOutlookColorScheme(document, scheme) {
   }
 }
 
+/* Keep the decision cues intentionally conservative. A confirmed meeting that
+ * overlaps the invitation is always a conflict; a confirmed meeting ending or
+ * starting within half an hour is a back-to-back warning. The local calendar
+ * cache is the only data source, so a provider failure never gets reported as
+ * a misleading free slot. */
+const AVAILABILITY_NEARBY_MINUTES = 30;
+const AVAILABILITY_LOOKAROUND_MINUTES = 240;
+const AVAILABILITY_MIN_TIMELINE_MINUTES = 180;
+const invitationAvailabilityDocumentState = new WeakMap();
+
+const AVAILABILITY_SURFACE_CSS = `
+  .outlook-style-availability {
+    box-sizing: border-box;
+    margin: 16px 0 4px;
+    padding: 12px;
+    border: 1px solid var(--outlook-divider-strong, #d1d1d1);
+    border-radius: 8px;
+    background: var(--outlook-surface-alt, #fafafa);
+    color: var(--outlook-text, #242424);
+    font: 13px/18px var(--fluent-font-family, "Segoe UI", sans-serif);
+  }
+  .outlook-style-availability-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .outlook-style-availability-title {
+    margin: 0;
+    color: inherit;
+    font: 600 14px/20px var(--fluent-font-family, "Segoe UI", sans-serif);
+  }
+  .outlook-style-availability-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .outlook-style-availability-status::before {
+    content: "";
+    inline-size: 10px;
+    block-size: 10px;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .outlook-style-availability[data-availability-state="green"] .outlook-style-availability-status {
+    color: #107c10;
+  }
+  .outlook-style-availability[data-availability-state="yellow"] .outlook-style-availability-status {
+    color: #8a6100;
+  }
+  .outlook-style-availability[data-availability-state="red"] .outlook-style-availability-status {
+    color: #c50f1f;
+  }
+  .outlook-style-availability[data-availability-state="unknown"] .outlook-style-availability-status {
+    color: var(--outlook-text-muted, #616161);
+  }
+  .outlook-style-availability-summary {
+    margin: 4px 0 0;
+    color: var(--outlook-text-secondary, #424242);
+  }
+  .outlook-style-availability-timeline {
+    position: relative;
+    block-size: 58px;
+    margin-block: 12px 4px;
+    border-block: 1px solid var(--outlook-divider, #e0e0e0);
+    background:
+      repeating-linear-gradient(
+        90deg,
+        transparent 0,
+        transparent calc(25% - 1px),
+        var(--outlook-divider, #e0e0e0) calc(25% - 1px),
+        var(--outlook-divider, #e0e0e0) 25%
+      );
+  }
+  .outlook-style-availability-block {
+    position: absolute;
+    box-sizing: border-box;
+    overflow: hidden;
+    min-inline-size: 4px;
+    padding: 2px 5px;
+    border-radius: 3px;
+    color: #fff;
+    font-size: 11px;
+    line-height: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .outlook-style-availability-block[data-kind="target"] {
+    inset-block-start: 7px;
+    block-size: 20px;
+    background: var(--outlook-accent, #0f6cbd);
+  }
+  .outlook-style-availability-block[data-kind="confirmed"] {
+    inset-block-start: 31px;
+    block-size: 20px;
+    background: #5c5c5c;
+  }
+  .outlook-style-availability-block[data-relation="overlap"] {
+    background: #c50f1f;
+  }
+  .outlook-style-availability-block[data-relation="nearby"] {
+    background: #8a6100;
+  }
+  .outlook-style-availability-scale {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--outlook-text-muted, #616161);
+    font-size: 11px;
+  }
+  .outlook-style-availability-events {
+    display: grid;
+    gap: 3px;
+    margin: 10px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .outlook-style-availability-events[hidden],
+  .outlook-style-availability-timeline[hidden],
+  .outlook-style-availability-scale[hidden] {
+    display: none;
+  }
+  .outlook-style-availability-event {
+    overflow: hidden;
+    color: var(--outlook-text-secondary, #424242);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .outlook-style-availability-event::before {
+    content: "";
+    display: inline-block;
+    inline-size: 7px;
+    block-size: 7px;
+    margin-inline-end: 6px;
+    border-radius: 50%;
+    background: #5c5c5c;
+  }
+  .outlook-style-availability-event[data-relation="overlap"]::before {
+    background: #c50f1f;
+  }
+  .outlook-style-availability-event[data-relation="nearby"]::before {
+    background: #8a6100;
+  }
+  @media (prefers-color-scheme: dark) {
+    .outlook-style-availability[data-availability-state="green"] .outlook-style-availability-status {
+      color: #6ccb5f;
+    }
+    .outlook-style-availability[data-availability-state="yellow"] .outlook-style-availability-status {
+      color: #fce100;
+    }
+    .outlook-style-availability[data-availability-state="red"] .outlook-style-availability-status {
+      color: #ff99a4;
+    }
+    .outlook-style-availability-block[data-kind="confirmed"] {
+      background: #adadad;
+      color: #242424;
+    }
+  }
+  @media (forced-colors: active) {
+    .outlook-style-availability {
+      border-color: ButtonBorder;
+      background: Canvas;
+      color: CanvasText;
+    }
+    .outlook-style-availability-status,
+    .outlook-style-availability[data-availability-state] .outlook-style-availability-status {
+      color: CanvasText;
+    }
+    .outlook-style-availability-block,
+    .outlook-style-availability-event::before {
+      forced-color-adjust: none;
+      border: 1px solid CanvasText;
+      background: Highlight;
+      color: HighlightText;
+    }
+  }
+`;
+
+function getAvailabilityDateTime(dateTime) {
+  if (!dateTime || dateTime.isDate) {
+    return null;
+  }
+  try {
+    return dateTime.getInTimezone(cal.dtz.defaultTimezone);
+  } catch (error) {
+    try {
+      return dateTime.clone();
+    } catch (cloneError) {
+      return null;
+    }
+  }
+}
+
+function offsetAvailabilityDateTime(dateTime, minutes) {
+  const result = dateTime?.clone?.();
+  if (!result || !Number.isFinite(minutes)) {
+    return null;
+  }
+  try {
+    result.addDuration(cal.createDuration(`PT${minutes}M`));
+    return result;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getAvailabilityBounds(item) {
+  const start = getAvailabilityDateTime(item?.startDate);
+  const end = getAvailabilityDateTime(item?.endDate);
+  if (!start || !end) {
+    return null;
+  }
+  try {
+    return end.compare(start) > 0 ? { start, end } : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function getAvailabilitySecondsBetween(later, earlier) {
+  try {
+    return later.subtractDate(earlier).inSeconds;
+  } catch (error) {
+    return NaN;
+  }
+}
+
+function isAvailabilityCalendarEnabled(calendar) {
+  try {
+    const disabled = calendar?.getProperty("disabled");
+    const composite = calendar?.getProperty("calendar-main-in-composite");
+    if (disabled === true || disabled === "true") {
+      return false;
+    }
+    return composite !== false && composite !== "false";
+  } catch (error) {
+    return false;
+  }
+}
+
+function hasAcceptedParticipation(item, calendar) {
+  const status = String(
+    item?.status || item?.getProperty?.("STATUS") || ""
+  ).toUpperCase();
+  const transparency = String(item?.getProperty?.("TRANSP") || "").toUpperCase();
+  if (status === "CANCELLED" || transparency === "TRANSPARENT") {
+    return false;
+  }
+
+  let attendee = null;
+  try {
+    attendee = cal.itip.getInvitedAttendee(item, calendar);
+  } catch (error) {
+    /* A non-scheduling calendar can still contain a personal meeting. */
+  }
+  if (attendee) {
+    return String(attendee.participationStatus || "").toUpperCase() === "ACCEPTED";
+  }
+
+  const attendees = item?.getAttendees?.() || [];
+  if (!attendees.length) {
+    return true;
+  }
+
+  const organizerId = normalizeAttendeeId(item?.organizer?.id);
+  const calendarOrganizerId = normalizeAttendeeId(
+    getCalendarOrganizerId(calendar)
+  );
+  return Boolean(
+    organizerId && calendarOrganizerId && organizerId === calendarOrganizerId
+  );
+}
+
+function isSameAvailabilityItem(candidate, target) {
+  if (!candidate || !target) {
+    return false;
+  }
+  if (candidate === target) {
+    return true;
+  }
+  return Boolean(candidate.id && target.id && candidate.id === target.id);
+}
+
+function getAvailabilityItemKey(item) {
+  const bounds = getAvailabilityBounds(item);
+  if (!bounds) {
+    return "";
+  }
+  return [item?.id || "", bounds.start.icalString, bounds.end.icalString].join(
+    "|"
+  );
+}
+
+async function getConfirmedAvailabilityEvents(item) {
+  const targetBounds = getAvailabilityBounds(item);
+  const rangeStart = targetBounds
+    ? offsetAvailabilityDateTime(
+        targetBounds.start,
+        -AVAILABILITY_LOOKAROUND_MINUTES
+      )
+    : null;
+  const rangeEnd = targetBounds
+    ? offsetAvailabilityDateTime(
+        targetBounds.end,
+        AVAILABILITY_LOOKAROUND_MINUTES
+      )
+    : null;
+  if (!targetBounds || !rangeStart || !rangeEnd) {
+    return { events: [], failed: true, targetBounds: null };
+  }
+
+  const events = [];
+  const eventKeys = new Set();
+  let failed = false;
+  const filter =
+    Ci.calICalendar.ITEM_FILTER_TYPE_EVENT |
+    Ci.calICalendar.ITEM_FILTER_CLASS_OCCURRENCES;
+  for (const calendar of cal.manager.getCalendars()) {
+    if (!isAvailabilityCalendarEnabled(calendar)) {
+      continue;
+    }
+    try {
+      for await (const itemBatch of cal.iterate.streamValues(
+        calendar.getItems(filter, 0, rangeStart, rangeEnd)
+      )) {
+        for (const candidate of itemBatch) {
+          const bounds = getAvailabilityBounds(candidate);
+          if (
+            !bounds ||
+            isSameAvailabilityItem(candidate, item) ||
+            !hasAcceptedParticipation(candidate, calendar)
+          ) {
+            continue;
+          }
+          const occurrenceKey = [
+            calendar.id || "",
+            candidate.hashId || candidate.id || "",
+            candidate.recurrenceId?.icalString || bounds.start.icalString,
+          ].join("|");
+          if (eventKeys.has(occurrenceKey)) {
+            continue;
+          }
+          eventKeys.add(occurrenceKey);
+          events.push({
+            bounds,
+            calendar,
+            item: candidate,
+          });
+        }
+      }
+    } catch (error) {
+      /* Do not turn a temporary provider/cache error into a green light. */
+      failed = true;
+    }
+  }
+
+  return { events, failed, targetBounds };
+}
+
+function getAvailabilityRelation(candidateBounds, targetBounds) {
+  const startsBeforeTargetEnds =
+    getAvailabilitySecondsBetween(candidateBounds.start, targetBounds.end) < 0;
+  const endsAfterTargetStarts =
+    getAvailabilitySecondsBetween(candidateBounds.end, targetBounds.start) > 0;
+  if (startsBeforeTargetEnds && endsAfterTargetStarts) {
+    return "overlap";
+  }
+
+  const beforeGap = getAvailabilitySecondsBetween(
+    targetBounds.start,
+    candidateBounds.end
+  );
+  const afterGap = getAvailabilitySecondsBetween(
+    candidateBounds.start,
+    targetBounds.end
+  );
+  if (
+    (beforeGap >= 0 && beforeGap <= AVAILABILITY_NEARBY_MINUTES * 60) ||
+    (afterGap >= 0 && afterGap <= AVAILABILITY_NEARBY_MINUTES * 60)
+  ) {
+    return "nearby";
+  }
+  return "other";
+}
+
+function getAvailabilityDisplayEvents(events, targetBounds) {
+  const overlapping = [];
+  let before = null;
+  let after = null;
+
+  for (const event of events) {
+    const relation = getAvailabilityRelation(event.bounds, targetBounds);
+    if (relation === "overlap") {
+      overlapping.push({ ...event, relation });
+      continue;
+    }
+    if (getAvailabilitySecondsBetween(targetBounds.start, event.bounds.end) >= 0) {
+      if (
+        !before ||
+        getAvailabilitySecondsBetween(event.bounds.end, before.bounds.end) > 0
+      ) {
+        before = { ...event, relation };
+      }
+      continue;
+    }
+    if (getAvailabilitySecondsBetween(event.bounds.start, targetBounds.end) >= 0) {
+      if (
+        !after ||
+        getAvailabilitySecondsBetween(after.bounds.start, event.bounds.start) > 0
+      ) {
+        after = { ...event, relation };
+      }
+    }
+  }
+
+  return [...overlapping, ...(before ? [before] : []), ...(after ? [after] : [])]
+    .sort(
+      (first, second) =>
+        getAvailabilitySecondsBetween(
+          first.bounds.start,
+          second.bounds.start
+        ) || 0
+    );
+}
+
+function formatAvailabilityTime(document, dateTime) {
+  try {
+    return cal.dtz.formatter.formatTime(dateTime);
+  } catch (error) {
+    return new Intl.DateTimeFormat(document.documentElement.lang || undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(dateTime.nativeTime / 1000));
+  }
+}
+
+function formatAvailabilityInterval(document, bounds) {
+  return `${formatAvailabilityTime(document, bounds.start)}–${formatAvailabilityTime(
+    document,
+    bounds.end
+  )}`;
+}
+
+function createAvailabilitySurface(document) {
+  const surface = document.createElementNS(HTML_NS, "section");
+  surface.className = "outlook-style-availability";
+  surface.setAttribute("role", "region");
+  surface.setAttribute("aria-label", "Your schedule around this event");
+
+  const style = document.createElementNS(HTML_NS, "style");
+  style.textContent = AVAILABILITY_SURFACE_CSS;
+  surface.appendChild(style);
+
+  const header = document.createElementNS(HTML_NS, "div");
+  header.className = "outlook-style-availability-header";
+  const title = document.createElementNS(HTML_NS, "h2");
+  title.className = "outlook-style-availability-title";
+  title.textContent = "Your schedule";
+  const status = document.createElementNS(HTML_NS, "span");
+  status.className = "outlook-style-availability-status";
+  header.append(title, status);
+
+  const summary = document.createElementNS(HTML_NS, "p");
+  summary.className = "outlook-style-availability-summary";
+  const timeline = document.createElementNS(HTML_NS, "div");
+  timeline.className = "outlook-style-availability-timeline";
+  const scale = document.createElementNS(HTML_NS, "div");
+  scale.className = "outlook-style-availability-scale";
+  const start = document.createElementNS(HTML_NS, "span");
+  const end = document.createElementNS(HTML_NS, "span");
+  scale.append(start, end);
+  const events = document.createElementNS(HTML_NS, "ul");
+  events.className = "outlook-style-availability-events";
+  surface.append(header, summary, timeline, scale, events);
+  return { end, events, scale, start, status, summary, surface, timeline };
+}
+
+function renderAvailabilitySurface(view, item, result) {
+  const { events, failed, targetBounds } = result;
+  if (!targetBounds) {
+    view.surface.dataset.availabilityState = "unknown";
+    view.status.textContent = "Schedule unavailable";
+    view.summary.textContent = "This event does not have a timed start and end.";
+    view.timeline.hidden = true;
+    view.scale.hidden = true;
+    view.events.hidden = true;
+    return;
+  }
+
+  const displayEvents = getAvailabilityDisplayEvents(events, targetBounds);
+  const hasConflict = displayEvents.some(event => event.relation === "overlap");
+  const hasNearby = displayEvents.some(event => event.relation === "nearby");
+  const state = hasConflict ? "red" : failed ? "unknown" : hasNearby ? "yellow" : "green";
+  const statusText = {
+    green: "Free to accept",
+    red: "Conflict",
+    unknown: "Schedule unavailable",
+    yellow: "Back-to-back",
+  }[state];
+  const summaryText = {
+    green: "No confirmed meeting overlaps this time.",
+    red: "A confirmed meeting overlaps this time.",
+    unknown:
+      "Some calendar data could not be read, so availability cannot be confirmed.",
+    yellow: `A confirmed meeting is within ${AVAILABILITY_NEARBY_MINUTES} minutes of this time.`,
+  }[state];
+  view.surface.dataset.availabilityState = state;
+  view.status.textContent = statusText;
+  view.summary.textContent = summaryText;
+  view.timeline.hidden = false;
+  view.scale.hidden = false;
+  view.events.hidden = !displayEvents.length;
+  view.timeline.replaceChildren();
+  view.events.replaceChildren();
+
+  let displayStart = offsetAvailabilityDateTime(
+    targetBounds.start,
+    -AVAILABILITY_NEARBY_MINUTES
+  );
+  let displayEnd = offsetAvailabilityDateTime(
+    targetBounds.end,
+    AVAILABILITY_NEARBY_MINUTES
+  );
+  for (const event of displayEvents) {
+    if (getAvailabilitySecondsBetween(displayStart, event.bounds.start) > 0) {
+      displayStart = event.bounds.start.clone();
+    }
+    if (getAvailabilitySecondsBetween(event.bounds.end, displayEnd) > 0) {
+      displayEnd = event.bounds.end.clone();
+    }
+  }
+  const currentDuration = getAvailabilitySecondsBetween(displayEnd, displayStart);
+  if (currentDuration < AVAILABILITY_MIN_TIMELINE_MINUTES * 60) {
+    const missingMinutes = Math.ceil(
+      (AVAILABILITY_MIN_TIMELINE_MINUTES * 60 - currentDuration) / 120
+    );
+    displayStart = offsetAvailabilityDateTime(displayStart, -missingMinutes);
+    displayEnd = offsetAvailabilityDateTime(displayEnd, missingMinutes);
+  }
+  const duration = Math.max(
+    1,
+    getAvailabilitySecondsBetween(displayEnd, displayStart)
+  );
+  const renderBlock = (bounds, label, kind, relation = "") => {
+    const left = Math.max(
+      0,
+      Math.min(
+        100,
+        (getAvailabilitySecondsBetween(bounds.start, displayStart) / duration) *
+          100
+      )
+    );
+    const right = Math.max(
+      left,
+      Math.min(
+        100,
+        (getAvailabilitySecondsBetween(bounds.end, displayStart) / duration) *
+          100
+      )
+    );
+    const block = view.surface.ownerDocument.createElementNS(HTML_NS, "span");
+    block.className = "outlook-style-availability-block";
+    block.dataset.kind = kind;
+    if (relation) {
+      block.dataset.relation = relation;
+    }
+    block.style.insetInlineStart = `${left}%`;
+    block.style.inlineSize = `${Math.max(2, right - left)}%`;
+    block.textContent = label;
+    block.title = label;
+    view.timeline.appendChild(block);
+  };
+
+  renderBlock(
+    targetBounds,
+    `This event · ${formatAvailabilityInterval(view.surface.ownerDocument, targetBounds)}`,
+    "target"
+  );
+  for (const event of displayEvents) {
+    const title = String(event.item.title || "Confirmed meeting").trim() || "Confirmed meeting";
+    const interval = formatAvailabilityInterval(view.surface.ownerDocument, event.bounds);
+    const label = `${title} · ${interval}`;
+    renderBlock(event.bounds, label, "confirmed", event.relation);
+    const listItem = view.surface.ownerDocument.createElementNS(HTML_NS, "li");
+    listItem.className = "outlook-style-availability-event";
+    if (event.relation !== "other") {
+      listItem.dataset.relation = event.relation;
+    }
+    const relationship =
+      event.relation === "overlap"
+        ? "Overlaps"
+        : event.relation === "nearby"
+          ? "Adjacent"
+          : "Nearby";
+    listItem.textContent = `${relationship}: ${label}`;
+    listItem.title = listItem.textContent;
+    view.events.appendChild(listItem);
+  }
+  view.start.textContent = formatAvailabilityTime(view.surface.ownerDocument, displayStart);
+  view.end.textContent = formatAvailabilityTime(view.surface.ownerDocument, displayEnd);
+}
+
+function updateAvailabilitySurface(view, item) {
+  const key = getAvailabilityItemKey(item);
+  if (!key || view.surface.dataset.availabilityItemKey === key) {
+    return;
+  }
+  view.surface.dataset.availabilityItemKey = key;
+  const revision = String((Number(view.surface.dataset.availabilityRevision) || 0) + 1);
+  view.surface.dataset.availabilityRevision = revision;
+  view.surface.dataset.availabilityState = "unknown";
+  view.status.textContent = "Checking schedule";
+  view.summary.textContent = "Checking confirmed meetings around this time…";
+  view.timeline.hidden = true;
+  view.scale.hidden = true;
+  view.events.hidden = true;
+  void getConfirmedAvailabilityEvents(item)
+    .then(result => {
+      if (
+        !view.surface.isConnected ||
+        view.surface.dataset.availabilityRevision !== revision
+      ) {
+        return;
+      }
+      renderAvailabilitySurface(view, item, result);
+    })
+    .catch(error => {
+      if (
+        !view.surface.isConnected ||
+        view.surface.dataset.availabilityRevision !== revision
+      ) {
+        return;
+      }
+      renderAvailabilitySurface(view, item, {
+        events: [],
+        failed: true,
+        targetBounds: getAvailabilityBounds(item),
+      });
+    });
+}
+
+/* A single read-only item card is shared by invitation previews, summary
+ * dialogs, and the first view of existing Calendar/Tasks items. Each native
+ * host retains its own response, save, recurrence, and reminder plumbing;
+ * choosing Edit simply reveals that host's existing editor. */
+const UNIFIED_ITEM_VIEW_CSS = `
+  .outlook-style-item-view {
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
+    align-content: start;
+    gap: 18px 24px;
+    margin: 12px;
+    padding: 20px;
+    border: 1px solid var(--outlook-divider-strong, #d1d1d1);
+    border-radius: 10px;
+    background: var(--outlook-surface, #ffffff);
+    color: var(--outlook-text, #242424);
+    font: 14px/20px var(--fluent-font-family, "Segoe UI", sans-serif);
+  }
+  .outlook-style-item-view-header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-block-end: 14px;
+    border-block-end: 1px solid var(--outlook-divider, #e0e0e0);
+  }
+  .outlook-style-item-view-kind {
+    margin: 0 0 4px;
+    color: var(--outlook-text-secondary, #424242);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .outlook-style-item-view-title {
+    margin: 0;
+    color: inherit;
+    font: 600 22px/28px var(--fluent-font-family, "Segoe UI", sans-serif);
+  }
+  .outlook-style-item-view-edit {
+    flex: 0 0 auto;
+    min-block-size: 32px;
+    padding: 5px 14px;
+    border: 1px solid var(--outlook-primary-fill, #0f6cbd);
+    border-radius: 4px;
+    background: var(--outlook-primary-fill, #0f6cbd);
+    color: var(--outlook-on-primary, #ffffff);
+    font: inherit;
+    font-weight: 600;
+  }
+  .outlook-style-item-view-edit:hover {
+    background: var(--outlook-primary-fill-hover, #115ea3);
+  }
+  .outlook-style-item-view-details,
+  .outlook-style-item-view-sidebar {
+    min-inline-size: 0;
+  }
+  .outlook-style-item-view-fields {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 7px 14px;
+    margin: 0;
+  }
+  .outlook-style-item-view-fields dt {
+    color: var(--outlook-text-secondary, #424242);
+    font-weight: 600;
+  }
+  .outlook-style-item-view-fields dd {
+    min-inline-size: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .outlook-style-item-view-section {
+    margin-block-start: 18px;
+  }
+  .outlook-style-item-view-section h3 {
+    margin: 0 0 8px;
+    color: inherit;
+    font: 600 15px/20px var(--fluent-font-family, "Segoe UI", sans-serif);
+  }
+  .outlook-style-item-view-description {
+    max-block-size: 340px;
+    margin: 0;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid var(--outlook-divider-strong, #d1d1d1);
+    border-radius: 4px;
+    background: var(--outlook-surface-alt, #fafafa);
+    color: inherit;
+    font: inherit;
+    white-space: pre-wrap;
+  }
+  .outlook-style-item-view-description a {
+    color: var(--outlook-accent, #0f6cbd);
+    cursor: pointer;
+    overflow-wrap: anywhere;
+    text-decoration: underline;
+  }
+  .outlook-style-item-view-attendees {
+    display: grid;
+    gap: 5px;
+    max-block-size: 310px;
+    margin: 0;
+    padding: 10px;
+    overflow: auto;
+    border: 1px solid var(--outlook-divider-strong, #d1d1d1);
+    border-radius: 4px;
+    background: var(--outlook-surface-alt, #fafafa);
+    list-style: none;
+  }
+  .outlook-style-item-view-attendee {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .outlook-style-item-view-attendee::before {
+    content: "●";
+    margin-inline-end: 7px;
+    color: var(--outlook-accent, #0f6cbd);
+  }
+  .outlook-style-item-view .outlook-style-availability {
+    margin: 0;
+  }
+  .outlook-style-item-view-single {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .outlook-style-item-view-single .outlook-style-item-view-sidebar {
+    display: none;
+  }
+  @media (max-width: 780px) {
+    .outlook-style-item-view {
+      grid-template-columns: minmax(0, 1fr);
+      margin: 8px;
+      padding: 14px;
+    }
+    .outlook-style-item-view-sidebar {
+      grid-row: auto;
+    }
+    .outlook-style-item-view-header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .outlook-style-item-view-edit {
+      align-self: flex-start;
+    }
+  }
+  @media (forced-colors: active) {
+    .outlook-style-item-view,
+    .outlook-style-item-view-description,
+    .outlook-style-item-view-attendees {
+      border-color: ButtonBorder;
+      background: Canvas;
+      color: CanvasText;
+    }
+    .outlook-style-item-view-description a {
+      color: LinkText;
+    }
+    .outlook-style-item-view-edit {
+      border-color: Highlight;
+      background: Highlight;
+      color: HighlightText;
+    }
+  }
+`;
+
+function getUnifiedItemDateRange(item) {
+  const isTask = item?.isTodo?.();
+  const start = isTask ? item.entryDate : item?.startDate;
+  let end = isTask ? item.dueDate : item?.endDate;
+  if (!isTask && end?.isDate) {
+    end = end.clone();
+    end.day--;
+  }
+  const format = value => {
+    if (!value) {
+      return "Not set";
+    }
+    try {
+      if (value.isDate) {
+        return cal.dtz.formatter.formatDateLong(value);
+      }
+      return cal.dtz.formatter.formatDateTime(
+        value.getInTimezone(cal.dtz.defaultTimezone)
+      );
+    } catch (error) {
+      return value.icalString || "Not set";
+    }
+  };
+  if (!start && !end) {
+    return "Not scheduled";
+  }
+  if (!start) {
+    return `Due ${format(end)}`;
+  }
+  if (!end) {
+    return `Starts ${format(start)}`;
+  }
+  if (start?.isDate && start.compare(end) === 0) {
+    return `${format(start)} (all day)`;
+  }
+  return `${format(start)} – ${format(end)}`;
+}
+
+function getUnifiedItemStatus(item) {
+  return String(item?.status || item?.getProperty?.("STATUS") || "").trim();
+}
+
+function getNativeEditorRequestKey(item) {
+  return [
+    item?.calendar?.id || "",
+    item?.id || "",
+    item?.recurrenceId?.icalString || "",
+  ].join("|");
+}
+
+const GO_SHORTCUT_PATTERN =
+  /\bgo\/[a-z0-9](?:[a-z0-9._~/-]*[a-z0-9_~/-])?/giu;
+
+function linkifyGoShortcuts(document, fragment) {
+  const textNodes = [];
+  const walker = document.createTreeWalker(
+    fragment,
+    document.defaultView.NodeFilter.SHOW_TEXT
+  );
+  while (walker.nextNode()) {
+    if (!walker.currentNode.parentElement?.closest?.("a")) {
+      textNodes.push(walker.currentNode);
+    }
+  }
+
+  for (const textNode of textNodes) {
+    const text = textNode.data;
+    const matches = [...text.matchAll(GO_SHORTCUT_PATTERN)];
+    if (!matches.length) {
+      continue;
+    }
+    const replacement = document.createDocumentFragment();
+    let offset = 0;
+    for (const match of matches) {
+      replacement.append(text.slice(offset, match.index));
+      const anchor = document.createElementNS(HTML_NS, "a");
+      anchor.href = `http:${"/".repeat(2)}${match[0]}`;
+      anchor.textContent = match[0];
+      replacement.appendChild(anchor);
+      offset = match.index + match[0].length;
+    }
+    replacement.append(text.slice(offset));
+    textNode.replaceWith(replacement);
+  }
+}
+
+function createUnifiedItemDescription(document, item, description) {
+  const fragment = cal.view.textToHtmlDocumentFragment(
+    description,
+    document,
+    item?.descriptionHTML
+  );
+  linkifyGoShortcuts(document, fragment);
+
+  for (const anchor of fragment.querySelectorAll("a[href]")) {
+    anchor.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.isTrusted || event.button !== 0) {
+        return;
+      }
+      try {
+        openLinkExternally(anchor.href, { addToHistory: false });
+      } catch (error) {
+        console.error(
+          "Outlook Style Companion could not open a calendar description link:",
+          error
+        );
+      }
+    });
+  }
+  return fragment;
+}
+
+function createUnifiedItemView(document, item, options = {}) {
+  const root = document.createElementNS(HTML_NS, "article");
+  root.className = "outlook-style-item-view";
+  root.setAttribute("role", "region");
+  root.setAttribute("aria-label", "Event details");
+  root.dataset.outlookItemKey = getAvailabilityItemKey(item);
+
+  const style = document.createElementNS(HTML_NS, "style");
+  style.textContent = UNIFIED_ITEM_VIEW_CSS;
+  root.appendChild(style);
+
+  const header = document.createElementNS(HTML_NS, "header");
+  header.className = "outlook-style-item-view-header";
+  const heading = document.createElementNS(HTML_NS, "div");
+  const kind = document.createElementNS(HTML_NS, "p");
+  kind.className = "outlook-style-item-view-kind";
+  kind.textContent = item?.isTodo?.() ? "Task" : "Event";
+  const title = document.createElementNS(HTML_NS, "h1");
+  title.className = "outlook-style-item-view-title";
+  title.textContent = String(item?.title || "Untitled").trim() || "Untitled";
+  heading.append(kind, title);
+  header.appendChild(heading);
+  if (typeof options.onEdit === "function") {
+    const edit = document.createElementNS(HTML_NS, "button");
+    edit.type = "button";
+    edit.className = "outlook-style-item-view-edit";
+    edit.textContent = options.editLabel || "Edit";
+    edit.addEventListener("click", options.onEdit);
+    header.appendChild(edit);
+  }
+
+  const details = document.createElementNS(HTML_NS, "div");
+  details.className = "outlook-style-item-view-details";
+  const fields = document.createElementNS(HTML_NS, "dl");
+  fields.className = "outlook-style-item-view-fields";
+  const appendField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    const term = document.createElementNS(HTML_NS, "dt");
+    term.textContent = label;
+    const definition = document.createElementNS(HTML_NS, "dd");
+    definition.textContent = value;
+    fields.append(term, definition);
+  };
+  appendField("When", getUnifiedItemDateRange(item));
+  appendField("Location", item?.getProperty?.("LOCATION")?.trim());
+  const organizer = item?.organizer;
+  appendField(
+    "Organizer",
+    organizer
+      ? organizer.commonName || cal.email.removeMailTo(organizer.id || "")
+      : ""
+  );
+  appendField("Status", getUnifiedItemStatus(item));
+  details.appendChild(fields);
+
+  const description = String(item?.descriptionText || "").trim();
+  if (description) {
+    const descriptionSection = document.createElementNS(HTML_NS, "section");
+    descriptionSection.className = "outlook-style-item-view-section";
+    const heading = document.createElementNS(HTML_NS, "h3");
+    heading.textContent = "Description";
+    const content = document.createElementNS(HTML_NS, "div");
+    content.className = "outlook-style-item-view-description";
+    content.appendChild(
+      createUnifiedItemDescription(document, item, description)
+    );
+    descriptionSection.append(heading, content);
+    details.appendChild(descriptionSection);
+  }
+
+  const sidebar = document.createElementNS(HTML_NS, "aside");
+  sidebar.className = "outlook-style-item-view-sidebar";
+  if (item?.isEvent?.() && getAvailabilityBounds(item)) {
+    const availability = createAvailabilitySurface(document);
+    sidebar.appendChild(availability.surface);
+    updateAvailabilitySurface(availability, item);
+  }
+  const attendees = item?.getAttendees?.() || [];
+  if (attendees.length) {
+    const attendeesSection = document.createElementNS(HTML_NS, "section");
+    attendeesSection.className = "outlook-style-item-view-section";
+    const heading = document.createElementNS(HTML_NS, "h3");
+    heading.textContent = "Attendees";
+    const list = document.createElementNS(HTML_NS, "ul");
+    list.className = "outlook-style-item-view-attendees";
+    for (const attendee of attendees) {
+      const entry = document.createElementNS(HTML_NS, "li");
+      entry.className = "outlook-style-item-view-attendee";
+      const email = cal.email.removeMailTo(attendee.id || "");
+      entry.textContent = attendee.commonName
+        ? `${attendee.commonName} <${email}>`
+        : email;
+      entry.title = entry.textContent;
+      list.appendChild(entry);
+    }
+    attendeesSection.append(heading, list);
+    sidebar.appendChild(attendeesSection);
+  }
+
+  if (!sidebar.childElementCount) {
+    root.classList.add("outlook-style-item-view-single");
+  }
+
+  root.append(header, details, sidebar);
+  return root;
+}
+
+function installInvitationAvailabilitySurface(document) {
+  if (invitationAvailabilityDocumentState.has(document)) {
+    invitationAvailabilityDocumentState.get(document).schedule();
+    return;
+  }
+  const display = document.getElementById("calendarInvitationDisplay");
+  const legacyAnchor = document.getElementById("mail-notification-top");
+  const legacyBar = document.getElementById("imip-bar");
+  if (!display && !legacyAnchor) {
+    return;
+  }
+
+  const getLegacyInvitationItem = () => {
+    if (legacyBar?.collapsed) {
+      return null;
+    }
+    try {
+      const itipItem =
+        document.defaultView?.calImipBar?.itipItem ||
+        document.defaultView?.calImipBar?.loadingItipItem;
+      return itipItem?.getItemList?.()[0] || null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const removeLegacySurface = () => {
+    document
+      .getElementById("outlook-style-legacy-item-view")
+      ?.remove();
+  };
+
+  let legacyDetails = null;
+  let legacyDetailsWasHidden = false;
+  let invitationWrapper = null;
+  let invitationWrapperWasHidden = false;
+  const restoreLegacyDetails = () => {
+    if (legacyDetails) {
+      legacyDetails.toggleAttribute("hidden", legacyDetailsWasHidden);
+    }
+    legacyDetails = null;
+  };
+  const hideLegacyDetails = () => {
+    const nextDetails = messagePane?.contentDocument?.getElementById(
+      "imipHTMLDetails"
+    );
+    if (nextDetails === legacyDetails) {
+      return;
+    }
+    restoreLegacyDetails();
+    if (nextDetails) {
+      legacyDetails = nextDetails;
+      legacyDetailsWasHidden = nextDetails.hasAttribute("hidden");
+      nextDetails.setAttribute("hidden", "hidden");
+    }
+  };
+  const restoreInvitationWrapper = () => {
+    if (invitationWrapper) {
+      invitationWrapper.toggleAttribute("hidden", invitationWrapperWasHidden);
+    }
+    invitationWrapper = null;
+  };
+
+  let frame = 0;
+  const refresh = () => {
+    frame = 0;
+    const invitation = display?.querySelector("calendar-invitation-panel");
+    const shadowRoot = invitation?.shadowRoot;
+    const item = invitation?.item;
+    if (invitation && shadowRoot && item) {
+      removeLegacySurface();
+      restoreLegacyDetails();
+      let view = shadowRoot.querySelector(":scope > .outlook-style-item-view");
+      if (!view) {
+        view = createUnifiedItemView(document, item, {
+          onEdit: () => document.defaultView?.calImipBar?.executeAction?.("X-SHOWDETAILS"),
+          editLabel: "Details",
+        });
+        const footer = shadowRoot.getElementById("footer");
+        if (footer) {
+          footer.before(view);
+        } else {
+          shadowRoot.appendChild(view);
+        }
+      }
+      const nextWrapper = shadowRoot.querySelector(
+        ".calendar-invitation-panel-wrapper"
+      );
+      if (nextWrapper && nextWrapper !== invitationWrapper) {
+        restoreInvitationWrapper();
+        invitationWrapper = nextWrapper;
+        invitationWrapperWasHidden = nextWrapper.hasAttribute("hidden");
+        nextWrapper.setAttribute("hidden", "hidden");
+      }
+      return;
+    }
+
+    restoreInvitationWrapper();
+
+    const legacyItem = getLegacyInvitationItem();
+    if (!legacyAnchor || !legacyItem) {
+      removeLegacySurface();
+      restoreLegacyDetails();
+      return;
+    }
+    let view = document.getElementById("outlook-style-legacy-item-view");
+    if (!view) {
+      view = createUnifiedItemView(document, legacyItem, {
+        onEdit: () => document.defaultView?.calImipBar?.executeAction?.("X-SHOWDETAILS"),
+        editLabel: "Details",
+      });
+      view.id = "outlook-style-legacy-item-view";
+      legacyAnchor.after(view);
+    }
+    hideLegacyDetails();
+  };
+  const schedule = () => {
+    const documentWindow = document.defaultView;
+    if (frame || !documentWindow || documentWindow.closed) {
+      return;
+    }
+    frame = documentWindow.requestAnimationFrame(refresh);
+  };
+  const observer = new document.defaultView.MutationObserver(schedule);
+  if (display) {
+    observer.observe(display, { childList: true, subtree: true });
+  }
+  if (legacyBar) {
+    observer.observe(legacyBar, {
+      attributes: true,
+      attributeFilter: ["collapsed", "hidden"],
+      childList: true,
+      subtree: true,
+    });
+  }
+  const messagePane = document.getElementById("messagepane");
+  messagePane?.addEventListener("load", schedule, true);
+  const cleanup = () => {
+    observer.disconnect();
+    messagePane?.removeEventListener("load", schedule, true);
+    restoreLegacyDetails();
+    restoreInvitationWrapper();
+    if (frame) {
+      document.defaultView?.cancelAnimationFrame(frame);
+      frame = 0;
+    }
+    invitationAvailabilityDocumentState.delete(document);
+  };
+  invitationAvailabilityDocumentState.set(document, { schedule });
+  document.defaultView.addEventListener("unload", cleanup, { once: true });
+  schedule();
+}
+
+function installEventSummaryAvailabilitySurface(window, cleanups) {
+  const document = window.document;
+  let retryTimer = 0;
+  let disposed = false;
+  const install = () => {
+    retryTimer = 0;
+    if (disposed || window.closed) {
+      return;
+    }
+    const item = window.calendarItem;
+    const summary = document.getElementById("calendar-item-summary");
+    if (!item || !summary?.isConnected) {
+      retryTimer = window.setTimeout(install, 100);
+      return;
+    }
+    let view = document.getElementById("outlook-style-summary-item-view");
+    if (!view) {
+      const canEdit = !window.isInvitation && !summary.readOnly;
+      view = createUnifiedItemView(document, item, {
+        onEdit: canEdit
+          ? () => {
+              nativeEditorRequestKeys.add(
+                getNativeEditorRequestKey(window.calendarItem)
+              );
+              window.useEditDialog?.(window.calendarItem);
+            }
+          : null,
+      });
+      view.id = "outlook-style-summary-item-view";
+      summary.before(view);
+      const wasHidden = summary.hasAttribute("hidden");
+      const footer = document.getElementById(
+        "calendar-summary-dialog-custom-button-footer"
+      );
+      const footerWasHidden = footer?.hasAttribute("hidden") || false;
+      summary.setAttribute("hidden", "hidden");
+      footer?.setAttribute("hidden", "hidden");
+      cleanups.push(() => {
+        summary.toggleAttribute("hidden", wasHidden);
+        footer?.toggleAttribute("hidden", footerWasHidden);
+        view.remove();
+      });
+    }
+  };
+  cleanups.push(() => {
+    disposed = true;
+    if (retryTimer) {
+      window.clearTimeout(retryTimer);
+    }
+  });
+  install();
+}
+
+function installCalendarCreationEnhancements(window) {
+  const document = window.document;
+  const controller = window.calendarViewController;
+  const originalCreateNewEvent = controller?.createNewEvent;
+  let toolbarObserver = null;
+  let popup = null;
+  let popupShowing = false;
+  const dropdownButtons = new Set();
+
+  for (const staleButton of document.querySelectorAll(
+    ".outlook-style-new-item-dropdown"
+  )) {
+    staleButton.remove();
+  }
+  for (const staleContainer of document.querySelectorAll(
+    ".outlook-style-new-item-split"
+  )) {
+    staleContainer.classList.remove("outlook-style-new-item-split");
+  }
+
+  /* Thunderbird normally commits a timed event immediately when its range is
+   * swept out in a day or week view. Keep the selected range, but send that
+   * one path through the native New Event dialog so the item is not created
+   * until the user has had a chance to add its details. */
+  let createNewEventWrapper = null;
+  if (
+    controller &&
+    typeof originalCreateNewEvent === "function" &&
+    typeof window.createEventWithDialog === "function"
+  ) {
+    createNewEventWrapper = function (
+      calendar,
+      startTime,
+      endTime,
+      forceAllDay
+    ) {
+      if (
+        startTime &&
+        endTime &&
+        !startTime.isDate &&
+        !endTime.isDate
+      ) {
+        return window.createEventWithDialog(
+          calendar,
+          startTime,
+          endTime,
+          null,
+          null,
+          forceAllDay
+        );
+      }
+      return originalCreateNewEvent.apply(this, arguments);
+    };
+    controller.createNewEvent = createNewEventWrapper;
+  }
+
+  const popupSet =
+    document.getElementById("mainPopupSet") ||
+    document.getElementById("calendar-popupset");
+  if (popupSet) {
+    document.getElementById("outlook-style-new-item-popup")?.remove();
+    popup = document.createXULElement("menupopup");
+    popup.id = "outlook-style-new-item-popup";
+    popup.className = "outlook-style-new-item-popup";
+
+    const newMessage = document.createXULElement("menuitem");
+    newMessage.id = "outlook-style-new-message-menuitem";
+    newMessage.setAttribute("label", "New Message");
+    newMessage.setAttribute("command", "cmd_newMessage");
+
+    const newEvent = document.createXULElement("menuitem");
+    newEvent.id = "outlook-style-new-event-menuitem";
+    newEvent.setAttribute("label", "New Event");
+    newEvent.setAttribute("command", "calendar_new_event_command");
+
+    popup.append(newMessage, newEvent);
+    popupSet.appendChild(popup);
+  }
+
+  const syncPopupState = () => {
+    popupShowing = true;
+    for (const button of dropdownButtons) {
+      button.setAttribute("aria-expanded", "true");
+    }
+  };
+  const clearPopupState = () => {
+    popupShowing = false;
+    for (const button of dropdownButtons) {
+      button.setAttribute("aria-expanded", "false");
+    }
+  };
+  popup?.addEventListener("popupshown", syncPopupState);
+  popup?.addEventListener("popuphidden", clearPopupState);
+
+  const decorateWriteButtons = () => {
+    if (!popup) {
+      return;
+    }
+    for (const liveContent of document.querySelectorAll(
+      '#unifiedToolbarContent li[item-id="write-message"] > .live-content'
+    )) {
+      liveContent.classList.add("outlook-style-new-item-split");
+      if (
+        liveContent.querySelector(
+          ":scope > .outlook-style-new-item-dropdown"
+        )
+      ) {
+        continue;
+      }
+      const button = document.createElementNS(HTML_NS, "button");
+      button.type = "button";
+      button.className = "outlook-style-new-item-dropdown";
+      button.title = "Create a new message or event";
+      button.setAttribute("aria-label", "More new item options");
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", "false");
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (popupShowing || popup.state === "open") {
+          popup.hidePopup();
+        } else {
+          popup.openPopup(button, {
+            position: "after_end",
+            triggerEvent: event,
+          });
+        }
+      });
+      liveContent.appendChild(button);
+      dropdownButtons.add(button);
+    }
+    for (const button of [...dropdownButtons]) {
+      if (!button.isConnected) {
+        dropdownButtons.delete(button);
+      }
+    }
+  };
+
+  const unifiedToolbar = document.querySelector("unified-toolbar");
+  if (unifiedToolbar) {
+    toolbarObserver = new window.MutationObserver(decorateWriteButtons);
+    toolbarObserver.observe(unifiedToolbar, {
+      childList: true,
+      subtree: true,
+    });
+    decorateWriteButtons();
+  }
+
+  return () => {
+    toolbarObserver?.disconnect();
+    popup?.removeEventListener("popupshown", syncPopupState);
+    popup?.removeEventListener("popuphidden", clearPopupState);
+    popup?.hidePopup?.();
+    popup?.remove();
+    for (const button of dropdownButtons) {
+      button.remove();
+    }
+    for (const liveContent of document.querySelectorAll(
+      ".outlook-style-new-item-split"
+    )) {
+      liveContent.classList.remove("outlook-style-new-item-split");
+    }
+    dropdownButtons.clear();
+    if (
+      createNewEventWrapper &&
+      controller.createNewEvent === createNewEventWrapper
+    ) {
+      controller.createNewEvent = originalCreateNewEvent;
+    }
+  };
+}
+
+function installFolderPaneNewItemButton(about3Pane) {
+  const document = about3Pane.document;
+  const writeButton = document.getElementById("folderPaneWriteMessage");
+  if (!writeButton?.parentElement) {
+    return null;
+  }
+  document.getElementById("outlook-style-folder-new-item-dropdown")?.remove();
+  document.getElementById("outlook-style-folder-new-item-popup")?.remove();
+
+  const dropdown = document.createElementNS(HTML_NS, "button");
+  dropdown.id = "outlook-style-folder-new-item-dropdown";
+  dropdown.type = "button";
+  dropdown.title = "Create a new message or event";
+  dropdown.setAttribute("aria-label", "More new item options");
+  dropdown.setAttribute("aria-haspopup", "menu");
+  dropdown.setAttribute("aria-expanded", "false");
+
+  const popup = document.createXULElement("menupopup");
+  popup.id = "outlook-style-folder-new-item-popup";
+  popup.className = "outlook-style-new-item-popup";
+  const newMessage = document.createXULElement("menuitem");
+  newMessage.setAttribute("label", "New Message");
+  const newEvent = document.createXULElement("menuitem");
+  newEvent.setAttribute("label", "New Event");
+  popup.append(newMessage, newEvent);
+
+  const onDropdown = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (popup.state === "open" || popup.state === "showing") {
+      popup.hidePopup();
+    } else {
+      popup.openPopup(dropdown, {
+        position: "after_start",
+        triggerEvent: event,
+      });
+    }
+  };
+  const onPopupShown = () =>
+    dropdown.setAttribute("aria-expanded", "true");
+  const onPopupHidden = () =>
+    dropdown.setAttribute("aria-expanded", "false");
+  const onNewMessage = event => about3Pane.top.MsgNewMessage(event);
+  const onNewEvent = () =>
+    about3Pane.top.goDoCommand("calendar_new_event_command");
+
+  dropdown.addEventListener("click", onDropdown);
+  popup.addEventListener("popupshown", onPopupShown);
+  popup.addEventListener("popuphidden", onPopupHidden);
+  newMessage.addEventListener("command", onNewMessage);
+  newEvent.addEventListener("command", onNewEvent);
+  writeButton.setAttribute("data-outlook-style-split-button", "true");
+  writeButton.before(dropdown);
+  document.body.appendChild(popup);
+
+  return () => {
+    dropdown.removeEventListener("click", onDropdown);
+    popup.removeEventListener("popupshown", onPopupShown);
+    popup.removeEventListener("popuphidden", onPopupHidden);
+    newMessage.removeEventListener("command", onNewMessage);
+    newEvent.removeEventListener("command", onNewEvent);
+    popup.hidePopup?.();
+    popup.remove();
+    dropdown.remove();
+    writeButton.removeAttribute("data-outlook-style-split-button");
+  };
+}
+
 function installMainPaneSchemeBridge(window) {
   if (mainPaneSchemeState.has(window)) {
     return true;
@@ -2227,11 +3730,23 @@ function installMainPaneSchemeBridge(window) {
     paneListeners: new Map(),
     conversationListeners: new Map(),
     browserDocuments: new Map(),
+    folderPaneCreationCleanups: new Map(),
+    removeCalendarCreationEnhancements: null,
   };
+
+  const calendarCreationCleanup = runEnhancementStep(
+    "calendar creation controls",
+    () => installCalendarCreationEnhancements(window)
+  );
+  state.removeCalendarCreationEnhancements =
+    typeof calendarCreationCleanup === "function"
+      ? calendarCreationCleanup
+      : null;
 
   const stampDocument = (document, scheme) => {
     try {
       stampOutlookColorScheme(document, scheme);
+      installInvitationAvailabilitySurface(document);
       if (document?.documentElement) {
         state.trackedDocuments.add(document);
       }
@@ -2254,6 +3769,270 @@ function installMainPaneSchemeBridge(window) {
     }
     state.trackedDocuments.delete(document);
     state.browserDocuments.delete(browser);
+  };
+
+  /* Thunderbird sizes a conversation article once when MsgLoaded fires by
+   * adding the message document height to #singleMessage. The Outlook card
+   * adds wrapper padding and borders outside those two measurements, and late
+   * header/body layout can make the one-shot result stale. On a short message
+   * with a tall recipient header, those missing pixels can consume the entire
+   * MIME browser and make a correctly loaded body appear blank. */
+  const elementIsHidden = element => {
+    if (!element?.isConnected) {
+      return true;
+    }
+    const hidden = element.getAttribute?.("hidden");
+    const collapsed = element.getAttribute?.("collapsed");
+    return Boolean(
+      element.hidden ||
+        (hidden != null && hidden !== "false") ||
+        (collapsed != null && collapsed !== "false")
+    );
+  };
+
+  const getContentScrollHeight = element => {
+    if (!element?.isConnected) {
+      return 0;
+    }
+    try {
+      if (elementIsHidden(element)) {
+        return 0;
+      }
+      return Number(element.scrollHeight) || 0;
+    } catch (error) {
+      return 0;
+    }
+  };
+
+  const getVisibleBlockSize = element => {
+    if (!element?.isConnected || elementIsHidden(element)) {
+      return 0;
+    }
+    try {
+      return Number(element.getBoundingClientRect().height) || 0;
+    } catch (error) {
+      return 0;
+    }
+  };
+
+  const disconnectConversationSizingObservers = record => {
+    for (const observer of record.resizeObservers) {
+      observer.disconnect();
+    }
+    record.resizeObservers.length = 0;
+    record.readerDocument = null;
+    record.mimeDocument = null;
+  };
+
+  const removeConversationBrowserSizing = record => {
+    record.browser.removeEventListener("load", record.onLoad, true);
+    record.browser.removeEventListener("MsgLoaded", record.onMsgLoaded, true);
+    if (record.resizeFrame) {
+      window.cancelAnimationFrame(record.resizeFrame);
+      record.resizeFrame = 0;
+    }
+    for (const timer of record.settleTimers) {
+      window.clearTimeout(timer);
+    }
+    record.settleTimers.clear();
+    if (record.repairBudgetTimer) {
+      window.clearTimeout(record.repairBudgetTimer);
+      record.repairBudgetTimer = 0;
+    }
+    disconnectConversationSizingObservers(record);
+  };
+
+  const measureConversationBrowser = record => {
+    const { browser } = record;
+    const article = browser.parentElement;
+    if (
+      !browser.isConnected ||
+      !article?.matches?.('article[aria-expanded="true"]')
+    ) {
+      return;
+    }
+
+    let readerDocument;
+    let mimeDocument;
+    let messageBrowser;
+    try {
+      readerDocument = browser.contentDocument;
+      if (readerDocument?.documentURI !== "about:message") {
+        return;
+      }
+      messageBrowser = readerDocument.getElementById("messagepane");
+      mimeDocument = messageBrowser?.contentDocument;
+      if (
+        !mimeDocument?.documentElement ||
+        !MESSAGE_DOCUMENT_URI_PATTERN.test(mimeDocument.documentURI || "")
+      ) {
+        return;
+      }
+    } catch (error) {
+      /* A nested reader can change remoteness while the message is loading. */
+      return;
+    }
+
+    const header = readerDocument.getElementById("singleMessage");
+    const notification = readerDocument.getElementById(
+      "mail-notification-top"
+    );
+    const invitation = readerDocument.getElementById(
+      "calendarInvitationDisplayContainer"
+    );
+    const attachmentView = readerDocument.getElementById("attachmentView");
+    const findToolbar = readerDocument.getElementById("findToolbar");
+
+    const contentHeight = Math.max(
+      getContentScrollHeight(mimeDocument.documentElement),
+      getContentScrollHeight(mimeDocument.body),
+      getContentScrollHeight(invitation)
+    );
+    const desiredBodyHeight = Math.max(160, contentHeight);
+    const visibleBodyHeight = Math.max(
+      getVisibleBlockSize(messageBrowser),
+      getVisibleBlockSize(invitation)
+    );
+    const missingBodyHeight = desiredBodyHeight - visibleBodyHeight;
+    if (
+      Number.isFinite(missingBodyHeight) &&
+      missingBodyHeight > 1 &&
+      record.repairBudget > 0 &&
+      record.totalGrowth < 100000
+    ) {
+      const renderedArticleHeight = getVisibleBlockSize(article);
+      const currentMinimum = Number.parseFloat(article.style.minHeight) || 0;
+      const growth = Math.min(
+        Math.ceil(missingBodyHeight),
+        100000 - record.totalGrowth
+      );
+      const requiredMinimum = Math.ceil(
+        Math.max(currentMinimum, renderedArticleHeight) + growth
+      );
+      if (requiredMinimum > currentMinimum) {
+        article.style.minHeight = `${requiredMinimum}px`;
+        record.totalGrowth += growth;
+        record.repairBudget--;
+        if (record.repairBudgetTimer) {
+          window.clearTimeout(record.repairBudgetTimer);
+        }
+        record.repairBudgetTimer = window.setTimeout(() => {
+          record.repairBudgetTimer = 0;
+          record.repairBudget = 2;
+        }, 1000);
+      }
+    }
+
+    if (
+      record.readerDocument === readerDocument &&
+      record.mimeDocument === mimeDocument
+    ) {
+      return;
+    }
+    disconnectConversationSizingObservers(record);
+    record.readerDocument = readerDocument;
+    record.mimeDocument = mimeDocument;
+    try {
+      const readerObserver = new readerDocument.defaultView.ResizeObserver(
+        record.schedule
+      );
+      for (const element of [
+        header,
+        notification,
+        invitation,
+        attachmentView,
+        findToolbar,
+        messageBrowser,
+      ]) {
+        if (element?.isConnected) {
+          readerObserver.observe(element);
+        }
+      }
+      record.resizeObservers.push(readerObserver);
+    } catch (error) {
+      /* Delayed settle passes still cover readers without ResizeObserver. */
+    }
+    try {
+      const mimeObserver = new mimeDocument.defaultView.ResizeObserver(
+        record.schedule
+      );
+      mimeObserver.observe(mimeDocument.documentElement);
+      if (mimeDocument.body) {
+        mimeObserver.observe(mimeDocument.body);
+      }
+      record.resizeObservers.push(mimeObserver);
+    } catch (error) {
+      /* A MIME document can be replaced while observers are being attached. */
+    }
+  };
+
+  const bindConversationBrowserSizing = (browser, listener) => {
+    for (const [trackedBrowser, record] of [...listener.sizingRecords]) {
+      if (!trackedBrowser.isConnected) {
+        removeConversationBrowserSizing(record);
+        listener.sizingRecords.delete(trackedBrowser);
+      }
+    }
+    let record = listener.sizingRecords.get(browser);
+    if (record) {
+      record.schedule();
+      return;
+    }
+    record = {
+      browser,
+      mimeDocument: null,
+      onLoad: null,
+      onMsgLoaded: null,
+      queueSettle: null,
+      readerDocument: null,
+      repairBudget: 2,
+      repairBudgetTimer: 0,
+      resizeFrame: 0,
+      resizeObservers: [],
+      schedule: null,
+      settleTimers: new Set(),
+      totalGrowth: 0,
+    };
+    record.schedule = () => {
+      if (
+        state.shuttingDown ||
+        !record.browser.isConnected ||
+        record.resizeFrame
+      ) {
+        return;
+      }
+      record.resizeFrame = window.requestAnimationFrame(() => {
+        record.resizeFrame = window.requestAnimationFrame(() => {
+          record.resizeFrame = 0;
+          measureConversationBrowser(record);
+        });
+      });
+    };
+    record.queueSettle = () => {
+      record.repairBudget = 2;
+      if (record.repairBudgetTimer) {
+        window.clearTimeout(record.repairBudgetTimer);
+        record.repairBudgetTimer = 0;
+      }
+      for (const timer of record.settleTimers) {
+        window.clearTimeout(timer);
+      }
+      record.settleTimers.clear();
+      record.schedule();
+      for (const delay of [100, 500, 1500]) {
+        const timer = window.setTimeout(() => {
+          record.settleTimers.delete(timer);
+          record.schedule();
+        }, delay);
+        record.settleTimers.add(timer);
+      }
+    };
+    record.onLoad = record.queueSettle;
+    record.onMsgLoaded = record.queueSettle;
+    browser.addEventListener("load", record.onLoad, true);
+    browser.addEventListener("MsgLoaded", record.onMsgLoaded, true);
+    listener.sizingRecords.set(browser, record);
+    record.queueSettle();
   };
 
   const stampBrowserDocument = (browser, document, scheme) => {
@@ -2288,6 +4067,10 @@ function installMainPaneSchemeBridge(window) {
     listener.observer.disconnect();
     listener.main.removeEventListener("keydown", listener.onKeyDown);
     listener.main.removeEventListener("click", listener.onClick, true);
+    for (const record of listener.sizingRecords.values()) {
+      removeConversationBrowserSizing(record);
+    }
+    listener.sizingRecords.clear();
     for (const browser of listener.main.querySelectorAll(
       'browser[src="about:message"]'
     )) {
@@ -2346,6 +4129,9 @@ function installMainPaneSchemeBridge(window) {
         'browser[src="about:message"]'
       )) {
         bindBrowser(browser);
+        if (listener) {
+          bindConversationBrowserSizing(browser, listener);
+        }
         try {
           if (browser.contentWindow?.location?.href === "about:message") {
             stampBrowserDocument(
@@ -2454,7 +4240,14 @@ function installMainPaneSchemeBridge(window) {
         scheduleSync();
       });
       observer.observe(main, { childList: true, subtree: true });
-      listener = { main, observer, onClick, onKeyDown, style };
+      listener = {
+        main,
+        observer,
+        onClick,
+        onKeyDown,
+        sizingRecords: new Map(),
+        style,
+      };
       state.conversationListeners.set(conversationView, listener);
       conversationView.setAttribute(
         "data-outlook-style-conversation",
@@ -2466,6 +4259,20 @@ function installMainPaneSchemeBridge(window) {
 
   const bindAbout3Pane = (about3Pane, scheme) => {
     const paneDocument = about3Pane.document;
+    const previousCreation = state.folderPaneCreationCleanups.get(about3Pane);
+    if (previousCreation?.document !== paneDocument) {
+      previousCreation?.cleanup?.();
+      state.folderPaneCreationCleanups.delete(about3Pane);
+    }
+    if (!state.folderPaneCreationCleanups.has(about3Pane)) {
+      const cleanup = installFolderPaneNewItemButton(about3Pane);
+      if (cleanup) {
+        state.folderPaneCreationCleanups.set(about3Pane, {
+          cleanup,
+          document: paneDocument,
+        });
+      }
+    }
     installConversationSelectionCapture(about3Pane, () =>
       refreshConversationForPane(about3Pane)
     );
@@ -2558,6 +4365,8 @@ function installMainPaneSchemeBridge(window) {
           /* The closed pane document may already be unavailable. */
         }
         state.trackedDocuments.delete(listener.paneDocument);
+        state.folderPaneCreationCleanups.get(about3Pane)?.cleanup?.();
+        state.folderPaneCreationCleanups.delete(about3Pane);
         removeConversationSelectionCapture(about3Pane);
         state.paneListeners.delete(about3Pane);
       }
@@ -2612,6 +4421,7 @@ function removeMainPaneSchemeBridge(window) {
     return;
   }
   state.shuttingDown = true;
+  state.removeCalendarCreationEnhancements?.();
   window.removeEventListener("windowlwthemeupdate", state.scheduleSync);
   state.systemScheme.removeEventListener("change", state.scheduleSync);
   state.tabEventTarget.removeEventListener("TabSelect", state.scheduleSync);
@@ -2631,6 +4441,10 @@ function removeMainPaneSchemeBridge(window) {
     listener.paneDocument.removeEventListener("load", listener.onLoad, true);
     listener.observer?.disconnect();
   }
+  for (const record of state.folderPaneCreationCleanups.values()) {
+    record.cleanup();
+  }
+  state.folderPaneCreationCleanups.clear();
   const ownedConversations = [];
   for (const about3Pane of getAbout3PaneWindows(window)) {
     const conversationView = about3Pane.document.querySelector(
@@ -4304,6 +6118,7 @@ function enhanceComposeEditorSurface(window, cleanups) {
   const document = window.document;
   let editor = null;
   let removeEditorTracking = null;
+  let removeMentions = null;
 
   const bindEditor = () => {
     const nextEditor = document.getElementById("messageEditor");
@@ -4311,10 +6126,12 @@ function enhanceComposeEditorSurface(window, cleanups) {
       return;
     }
     removeEditorTracking?.();
+    removeMentions?.();
     editor = nextEditor;
     removeEditorTracking = editor
       ? trackEditorSurface(editor, true)
       : null;
+    removeMentions = editor ? installComposeMentionAutocomplete(editor) : null;
   };
 
   const observer = new window.MutationObserver(bindEditor);
@@ -4322,10 +6139,589 @@ function enhanceComposeEditorSurface(window, cleanups) {
     observer.disconnect();
     removeEditorTracking?.();
     removeEditorTracking = null;
+    removeMentions?.();
+    removeMentions = null;
     editor = null;
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
   bindEditor();
+}
+
+/**
+ * Return local address-book entries matching a compose @-mention query. This
+ * deliberately uses Thunderbird's address-book service, so it neither reads
+ * messages nor sends contact data anywhere.
+ *
+ * @param {string} query - The text after the @ sign.
+ * @returns {{name: string, email: string}[]} Matching contacts.
+ */
+function getComposeMentionContacts(query) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const contacts = new Map();
+  for (const directory of Array.from(MailServices.ab.directories || [])) {
+    if (directory.isMailList) {
+      continue;
+    }
+    let cards;
+    try {
+      cards = Array.from(directory.childCards || []);
+    } catch (error) {
+      /* An unavailable directory must not prevent other address books from
+       * supplying a compose suggestion. */
+      continue;
+    }
+    for (const card of cards) {
+      if (card.isMailList) {
+        continue;
+      }
+      const name = String(
+        card.displayName || card.getProperty?.("DisplayName", "") || ""
+      ).trim();
+      const emails = [
+        card.primaryEmail,
+        card.getProperty?.("SecondEmail", ""),
+      ];
+      for (const candidate of emails) {
+        const email = String(candidate || "").trim();
+        if (!email) {
+          continue;
+        }
+        const label = name || email;
+        if (
+          normalizedQuery &&
+          !label.toLocaleLowerCase().includes(normalizedQuery) &&
+          !email.toLocaleLowerCase().includes(normalizedQuery)
+        ) {
+          continue;
+        }
+        contacts.set(email.toLocaleLowerCase(), { name: label, email });
+      }
+    }
+  }
+  return [...contacts.values()]
+    .sort((first, second) =>
+      first.name.localeCompare(second.name, undefined, { sensitivity: "base" })
+    )
+    .slice(0, 8);
+}
+
+/**
+ * Add an Outlook-style contact picker to the compose editor. Thunderbird's
+ * normal address autocomplete only operates in recipient fields; this makes
+ * @ work in the message body for new messages and replies as well.
+ *
+ * @param {Element} editor - Thunderbird's compose editor element.
+ * @returns {Function} A cleanup function.
+ */
+function installComposeMentionAutocomplete(editor) {
+  /* XUL's compose editor in Thunderbird 154 does not always expose
+   * `ownerGlobal`, even though it belongs to the compose chrome document.
+   * Resolve the owning window through that document as well so the mention
+   * feature can attach on both supported Thunderbird versions. */
+  const window = editor.ownerGlobal || editor.ownerDocument?.defaultView;
+  if (!window) {
+    return () => {};
+  }
+  const chromeDocument = window.document;
+  const popupSet = chromeDocument.getElementById("mainPopupSet");
+  if (!popupSet) {
+    return () => {};
+  }
+
+  let editorDocument = null;
+  let popup = null;
+  let list = null;
+  let mentionRange = null;
+  let contacts = [];
+  let activeIndex = 0;
+  let hideTimer = 0;
+  let handledKeyDown = "";
+  const handledPickerKeyEvents = new WeakSet();
+  const systemKeyListenerOptions = {
+    capture: true,
+    mozSystemGroup: true,
+  };
+  let suppressSelectionUpdate = false;
+  let suppressSelectionTimer = 0;
+
+  const isOpen = () => popup?.state === "open" || popup?.state === "showing";
+  const hide = () => {
+    if (hideTimer) {
+      window.clearTimeout(hideTimer);
+      hideTimer = 0;
+    }
+    if (suppressSelectionTimer) {
+      window.clearTimeout(suppressSelectionTimer);
+      suppressSelectionTimer = 0;
+    }
+    suppressSelectionUpdate = false;
+    handledKeyDown = "";
+    mentionRange = null;
+    contacts = [];
+    activeIndex = 0;
+    try {
+      popup?.hidePopup();
+    } catch (error) {
+      /* A closing compose window can tear down its popup first. */
+    }
+  };
+
+  const getMentionContext = () => {
+    const selection = editor.contentWindow?.getSelection?.();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const Node = editorDocument?.defaultView?.Node;
+    if (
+      !range?.collapsed ||
+      !Node ||
+      range.startContainer.nodeType !== Node.TEXT_NODE
+    ) {
+      return null;
+    }
+    /* A mention's visible name is intentionally editable. Never reopen the
+     * contact picker while the caret is inside an existing mention link; its
+     * mailto target and stored email remain unchanged as the label is shortened. */
+    if (
+      range.startContainer.parentElement?.closest?.(
+        "a.outlook-compose-mention[data-outlook-mention-email]"
+      )
+    ) {
+      return null;
+    }
+    const beforeCaret = range.startContainer.data.slice(0, range.startOffset);
+    const match = beforeCaret.match(/(?:^|\s|[([{"'.,;:!?])@([^\s@]*)$/u);
+    if (!match) {
+      return null;
+    }
+    const tokenOffset = match.index + match[0].lastIndexOf("@");
+    const tokenRange = editorDocument.createRange();
+    tokenRange.setStart(range.startContainer, tokenOffset);
+    tokenRange.setEnd(range.startContainer, range.startOffset);
+    return { query: match[1], range: tokenRange };
+  };
+
+  const render = () => {
+    if (!list) {
+      return;
+    }
+    list.replaceChildren();
+    if (!contacts.length) {
+      const empty = chromeDocument.createElementNS(HTML_NS, "div");
+      empty.className = "outlook-compose-mention-empty";
+      empty.setAttribute("role", "status");
+      empty.textContent = "No matching contacts";
+      list.appendChild(empty);
+      return;
+    }
+    contacts.forEach((contact, index) => {
+      const item = chromeDocument.createElementNS(HTML_NS, "button");
+      const name = chromeDocument.createElementNS(HTML_NS, "span");
+      const email = chromeDocument.createElementNS(HTML_NS, "span");
+      item.className = "outlook-compose-mention-item";
+      item.type = "button";
+      item.setAttribute("role", "option");
+      item.setAttribute("tooltiptext", contact.email);
+      item.setAttribute("aria-label", `Mention ${contact.name}, ${contact.email}`);
+      item.setAttribute("aria-selected", String(index === activeIndex));
+      if (index === activeIndex) {
+        item.setAttribute("data-active", "true");
+      }
+      name.className = "outlook-compose-mention-name";
+      name.textContent = contact.name;
+      email.className = "outlook-compose-mention-email";
+      email.textContent = contact.email;
+      item.addEventListener("mousedown", event => event.preventDefault());
+      item.addEventListener("click", () => choose(index));
+      item.append(name, email);
+      list.appendChild(item);
+    });
+    list
+      .querySelector('[data-active="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  };
+
+  const getMentionLink = selection => {
+    const Node = editorDocument?.defaultView?.Node;
+    const node = selection?.anchorNode;
+    if (!Node || !node) {
+      return null;
+    }
+    const element =
+      node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    return element?.closest?.("a[href]") || null;
+  };
+
+  const choose = index => {
+    const contact = contacts[index];
+    if (!contact || !mentionRange || !editorDocument) {
+      hide();
+      return;
+    }
+    const selection = editor.contentWindow?.getSelection?.();
+    try {
+      selection.removeAllRanges();
+      selection.addRange(mentionRange);
+      const mention = `@${contact.name}`;
+      let insertedText = null;
+      if (editorDocument.execCommand("insertText", false, mention)) {
+        const insertedRange = selection.rangeCount
+          ? selection.getRangeAt(0)
+          : null;
+        const Node = editorDocument.defaultView?.Node;
+        if (
+          Node &&
+          insertedRange?.collapsed &&
+          insertedRange.startContainer.nodeType === Node.TEXT_NODE &&
+          insertedRange.startOffset >= mention.length
+        ) {
+          insertedText = editorDocument.createRange();
+          insertedText.setStart(
+            insertedRange.startContainer,
+            insertedRange.startOffset - mention.length
+          );
+          insertedText.setEnd(
+            insertedRange.startContainer,
+            insertedRange.startOffset
+          );
+        }
+      } else {
+        mentionRange.deleteContents();
+        const text = editorDocument.createTextNode(mention);
+        mentionRange.insertNode(text);
+        insertedText = editorDocument.createRange();
+        insertedText.selectNodeContents(text);
+        selection.removeAllRanges();
+        selection.addRange(insertedText);
+      }
+      if (insertedText) {
+        selection.removeAllRanges();
+        selection.addRange(insertedText);
+        editorDocument.execCommand(
+          "createLink",
+          false,
+          `mailto:${encodeURIComponent(contact.email)}`
+        );
+      }
+      const link = getMentionLink(selection);
+      if (link) {
+        link.classList.add("outlook-compose-mention");
+        link.setAttribute("title", contact.email);
+        link.setAttribute("data-outlook-mention-email", contact.email);
+        Object.assign(link.style, {
+          backgroundColor: "#e6f2ff",
+          borderRadius: "3px",
+          color: "#0f6cbd",
+          fontWeight: "600",
+          padding: "1px 3px",
+          textDecoration: "none",
+        });
+        const afterLink = editorDocument.createRange();
+        afterLink.setStartAfter(link);
+        afterLink.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(afterLink);
+        if (!editorDocument.execCommand("insertText", false, " ")) {
+          const space = editorDocument.createTextNode(" ");
+          afterLink.insertNode(space);
+          afterLink.setStartAfter(space);
+          afterLink.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(afterLink);
+        }
+      }
+      editor.contentWindow?.focus();
+    } finally {
+      hide();
+    }
+  };
+
+  const update = () => {
+    const context = getMentionContext();
+    if (!context) {
+      hide();
+      return;
+    }
+    mentionRange = context.range;
+    contacts = getComposeMentionContacts(context.query);
+    activeIndex = 0;
+    render();
+    if (!isOpen()) {
+      try {
+        /* `after_start` anchors below the entire editor element. In a compose
+         * window that editor fills the remaining height, so the suggestion
+         * panel would normally open beyond the bottom edge of the window.
+         * `overlap` starts at the editor's top-left instead; the range rect is
+         * in the editor document's viewport, which gives us a stable position
+         * immediately beneath the @ token. */
+        const tokenRect = context.range.getBoundingClientRect();
+        popup.openPopup(
+          editor,
+          "overlap",
+          Math.max(0, Math.round(tokenRect.right)),
+          Math.max(0, Math.round(tokenRect.bottom)),
+          false,
+          false
+        );
+      } catch (error) {
+        hide();
+      }
+    }
+  };
+
+  const onInput = () => update();
+  const onSelectionChange = () => {
+    if (isOpen() && !suppressSelectionUpdate) {
+      update();
+    }
+  };
+  const suppressSelectionSync = () => {
+    suppressSelectionUpdate = true;
+    if (suppressSelectionTimer) {
+      window.clearTimeout(suppressSelectionTimer);
+    }
+    suppressSelectionTimer = window.setTimeout(() => {
+      suppressSelectionTimer = 0;
+      suppressSelectionUpdate = false;
+    }, 0);
+  };
+  const getMentionAtBackspaceCaret = selection => {
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const Node = editorDocument?.defaultView?.Node;
+    if (!range?.collapsed || !Node) {
+      return null;
+    }
+    const container = range.startContainer;
+    const parentElement =
+      container.nodeType === Node.ELEMENT_NODE
+        ? container
+        : container.parentElement;
+    const containingMention = parentElement?.closest?.(
+      "a.outlook-compose-mention[data-outlook-mention-email]"
+    );
+    if (containingMention) {
+      return containingMention;
+    }
+
+    let candidate = null;
+    if (container.nodeType === Node.TEXT_NODE) {
+      if (container.data.slice(0, range.startOffset).trim()) {
+        return null;
+      }
+      candidate = container.previousSibling;
+    } else if (range.startOffset > 0) {
+      candidate = container.childNodes[range.startOffset - 1];
+    }
+    while (candidate?.nodeType === Node.TEXT_NODE && !candidate.data.trim()) {
+      candidate = candidate.previousSibling;
+    }
+    return candidate?.matches?.(
+      "a.outlook-compose-mention[data-outlook-mention-email]"
+    )
+      ? candidate
+      : null;
+  };
+  const handleMentionBackspace = event => {
+    if (
+      event.key !== "Backspace" ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.isComposing ||
+      !editorDocument
+    ) {
+      return false;
+    }
+    const selection = editor.contentWindow?.getSelection?.();
+    const link = getMentionAtBackspaceCaret(selection);
+    const textNode = link?.firstChild;
+    const Node = editorDocument.defaultView?.Node;
+    if (!link || !Node || textNode?.nodeType !== Node.TEXT_NODE) {
+      return false;
+    }
+    const trailingWord = textNode.data.match(/\s+\S+$/u);
+    if (!trailingWord) {
+      return false;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    const deletion = editorDocument.createRange();
+    deletion.setStart(textNode, trailingWord.index);
+    deletion.setEnd(textNode, textNode.data.length);
+    selection.removeAllRanges();
+    selection.addRange(deletion);
+    if (!editorDocument.execCommand("delete", false)) {
+      textNode.deleteData(trailingWord.index, trailingWord[0].length);
+    }
+    const afterMention = editorDocument.createRange();
+    const trailingText = link.nextSibling;
+    if (
+      trailingText?.nodeType === Node.TEXT_NODE &&
+      trailingText.data.startsWith(" ")
+    ) {
+      afterMention.setStart(trailingText, 1);
+    } else {
+      afterMention.setStartAfter(link);
+    }
+    afterMention.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(afterMention);
+    editor.contentWindow?.focus();
+    return true;
+  };
+  const handlePickerKey = event => {
+    if (!isOpen() || !contacts.length || event.isComposing) {
+      return false;
+    }
+    if (
+      ![
+        "ArrowDown",
+        "ArrowUp",
+        "Enter",
+        "Tab",
+        "Escape",
+      ].includes(event.key)
+    ) {
+      return false;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    suppressSelectionSync();
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      activeIndex =
+        (activeIndex + (event.key === "ArrowDown" ? 1 : -1) + contacts.length) %
+        contacts.length;
+      render();
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      choose(activeIndex);
+    } else {
+      hide();
+    }
+    return true;
+  };
+  const onKeyDown = event => {
+    /* Thunderbird's editor can mark navigation keys handled before add-on
+     * listeners receive them. Deliberately handle those events anyway, then
+     * suppress its matching selectionchange so the highlighted result is not
+     * reset to the first row. This uses standard DOM key values and therefore
+     * works on Windows, macOS, and Linux. */
+    if (handledPickerKeyEvents.has(event)) {
+      return;
+    }
+    if (handleMentionBackspace(event)) {
+      handledPickerKeyEvents.add(event);
+      handledKeyDown = event.key;
+      return;
+    }
+    if (handlePickerKey(event)) {
+      handledPickerKeyEvents.add(event);
+      handledKeyDown = event.key;
+    }
+  };
+  const onKeyUp = event => {
+    if (handledPickerKeyEvents.has(event)) {
+      return;
+    }
+    handledPickerKeyEvents.add(event);
+    if (event.key === handledKeyDown) {
+      handledKeyDown = "";
+      return;
+    }
+    handlePickerKey(event);
+  };
+  const onBlur = () => {
+    hideTimer = window.setTimeout(hide, 150);
+  };
+  const onFocus = () => {
+    if (hideTimer) {
+      window.clearTimeout(hideTimer);
+      hideTimer = 0;
+    }
+  };
+  const onPopupHidden = () => {
+    mentionRange = null;
+  };
+  const removeDocumentListeners = () => {
+    editorDocument?.removeEventListener("input", onInput, true);
+    editorDocument?.removeEventListener("keydown", onKeyDown, true);
+    editorDocument?.removeEventListener("keyup", onKeyUp, true);
+    editorDocument?.defaultView?.removeEventListener(
+      "keydown",
+      onKeyDown,
+      systemKeyListenerOptions
+    );
+    editorDocument?.defaultView?.removeEventListener(
+      "keyup",
+      onKeyUp,
+      systemKeyListenerOptions
+    );
+    editorDocument?.removeEventListener("selectionchange", onSelectionChange);
+    editorDocument?.defaultView?.removeEventListener("blur", onBlur);
+    editorDocument?.defaultView?.removeEventListener("focus", onFocus);
+    editorDocument = null;
+  };
+  const bindEditorDocument = () => {
+    removeDocumentListeners();
+    const nextDocument = editor.contentDocument;
+    if (!nextDocument?.body) {
+      return;
+    }
+    editorDocument = nextDocument;
+    editorDocument.addEventListener("input", onInput, true);
+    editorDocument.addEventListener("keydown", onKeyDown, true);
+    editorDocument.addEventListener("keyup", onKeyUp, true);
+    /* Gecko's HTML editor handles physical arrow keys in its privileged system
+     * event group. Listen at the editor window's capture phase in that same
+     * group so real keyboards reach the picker on macOS, Windows, and Linux. */
+    editorDocument.defaultView?.addEventListener(
+      "keydown",
+      onKeyDown,
+      systemKeyListenerOptions
+    );
+    editorDocument.defaultView?.addEventListener(
+      "keyup",
+      onKeyUp,
+      systemKeyListenerOptions
+    );
+    editorDocument.addEventListener("selectionchange", onSelectionChange);
+    editorDocument.defaultView?.addEventListener("blur", onBlur);
+    editorDocument.defaultView?.addEventListener("focus", onFocus);
+  };
+  const onEditorLoad = () => bindEditorDocument();
+
+  popup = chromeDocument.createXULElement("panel");
+  popup.id = "outlook-compose-mention-popup";
+  popup.className = "outlook-compose-mention-popup";
+  popup.setAttribute("type", "arrow");
+  popup.setAttribute("role", "listbox");
+  popup.setAttribute("aria-label", "Mention a contact");
+  popup.setAttribute("noautofocus", "true");
+  popup.setAttribute("consumeoutsideclicks", "false");
+  list = chromeDocument.createElementNS(HTML_NS, "div");
+  list.className = "outlook-compose-mention-list";
+  popup.appendChild(list);
+  popupSet.appendChild(popup);
+  popup.addEventListener("popuphidden", onPopupHidden);
+  editor.addEventListener("keydown", onKeyDown, true);
+  editor.addEventListener("keyup", onKeyUp, true);
+  window.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("keyup", onKeyUp, true);
+  editor.addEventListener("load", onEditorLoad, true);
+  bindEditorDocument();
+
+  return () => {
+    hide();
+    removeDocumentListeners();
+    editor.removeEventListener("keydown", onKeyDown, true);
+    editor.removeEventListener("keyup", onKeyUp, true);
+    window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("keyup", onKeyUp, true);
+    editor.removeEventListener("load", onEditorLoad, true);
+    popup?.removeEventListener("popuphidden", onPopupHidden);
+    popup?.remove();
+    popup = null;
+    list = null;
+  };
 }
 
 /**
@@ -5283,7 +7679,16 @@ function installAttendeeDialogGeometry(window, cleanups) {
 function enhanceAttendeeDialogSurface(window, cleanups) {
   const document = window.document;
   let notice = null;
+  let findTimeButton = null;
+  let findTimeStatus = null;
+  let findTimeGeneration = 0;
+  let allDayToggle = null;
   cleanups.push(() => {
+    findTimeGeneration++;
+    allDayToggle?.removeEventListener("command", syncFindTimeButton);
+    findTimeButton?.removeEventListener("click", onFindTime);
+    findTimeButton?.remove();
+    findTimeStatus?.remove();
     notice?.remove();
     document.documentElement.removeAttribute(
       "data-outlook-attendee-dialog"
@@ -5308,6 +7713,310 @@ function enhanceAttendeeDialogSurface(window, cleanups) {
   } else {
     (document.querySelector("dialog") || document.body).prepend(notice);
   }
+
+  const topBar = document.querySelector("dialog > hbox:first-child");
+  const topBarSpacer = topBar?.querySelector(":scope > spacer");
+  if (!topBar || !topBarSpacer) {
+    return;
+  }
+
+  findTimeButton = document.createElementNS(HTML_NS, "button");
+  findTimeButton.id = "outlook-style-find-time";
+  findTimeButton.type = "button";
+  findTimeButton.textContent = "Find time";
+  findTimeButton.title =
+    "Select the first work-time slot when everyone is free or tentative";
+
+  findTimeStatus = document.createElementNS(HTML_NS, "span");
+  findTimeStatus.id = "outlook-style-find-time-status";
+  findTimeStatus.setAttribute("role", "status");
+  findTimeStatus.setAttribute("aria-live", "polite");
+  topBar.insertBefore(findTimeButton, topBarSpacer);
+  topBar.insertBefore(findTimeStatus, topBarSpacer);
+
+  const getAttendeeIds = () => {
+    const ids = new Map();
+    for (const row of document.querySelectorAll(
+      "#attendee-list event-attendee"
+    )) {
+      let id = "";
+      try {
+        id = row.attendee?.id || "";
+      } catch (error) {
+        /* A row can be rebuilding while autocomplete commits its value. */
+      }
+      const email = cal.email.removeMailTo(id).trim();
+      if (email) {
+        ids.set(email.toLowerCase(), cal.email.prependMailTo(email));
+      }
+    }
+    return [...ids.values()];
+  };
+
+  const getBusyIntervals = (attendeeId, from, to, generation) =>
+    new Promise(resolve => {
+      const intervals = [];
+      let finished = false;
+      let timer = 0;
+      const finish = complete => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        if (timer) {
+          window.clearTimeout(timer);
+        }
+        resolve({ complete, intervals });
+      };
+      timer = window.setTimeout(() => finish(false), 15000);
+      try {
+        cal.freeBusyService.getFreeBusyIntervals(
+          attendeeId,
+          from,
+          to,
+          Ci.calIFreeBusyInterval.BUSY_ALL,
+          {
+            onResult(operation, results) {
+              if (generation !== findTimeGeneration) {
+                finish(false);
+                return;
+              }
+              for (const result of results || []) {
+                const type = Number(result.freeBusyType);
+                if (
+                  type !== Ci.calIFreeBusyInterval.FREE &&
+                  type !== Ci.calIFreeBusyInterval.BUSY_TENTATIVE
+                ) {
+                  intervals.push(result.interval);
+                }
+              }
+              if (!operation.isPending) {
+                finish(true);
+              }
+            },
+          }
+        );
+      } catch (error) {
+        finish(false);
+      }
+    });
+
+  const roundUpToQuarterHour = dateTime => {
+    const rounded = dateTime.clone();
+    rounded.isDate = false;
+    const extraMinutes = (15 - (rounded.minute % 15)) % 15;
+    if (rounded.second || extraMinutes) {
+      rounded.minute += extraMinutes || 15;
+    }
+    rounded.second = 0;
+    return rounded;
+  };
+
+  const dayOffPreferences = [
+    "calendar.week.d0sundaysoff",
+    "calendar.week.d1mondaysoff",
+    "calendar.week.d2tuesdaysoff",
+    "calendar.week.d3wednesdaysoff",
+    "calendar.week.d4thursdaysoff",
+    "calendar.week.d5fridaysoff",
+    "calendar.week.d6saturdaysoff",
+  ];
+  const isWorkingDay = dateTime =>
+    !Services.prefs.getBoolPref(
+      dayOffPreferences[dateTime.weekday],
+      false
+    );
+  const overlaps = (candidateStart, candidateEnd, intervals) =>
+    intervals.some(
+      interval =>
+        interval?.start?.compare(candidateEnd) < 0 &&
+        interval?.end?.compare(candidateStart) > 0
+    );
+
+  const applyFoundTime = (candidateStart, duration) => {
+    const picker = window.dateTimePickerUI;
+    const originalZone = picker.startValue.timezone;
+    const nextStart = candidateStart.getInTimezone(originalZone);
+    const nextEnd = nextStart.clone();
+    nextEnd.addDuration(duration);
+    window.updateByFunction = true;
+    try {
+      picker.startValue = nextStart;
+      picker.endValue = nextEnd;
+      picker.saveOldValues();
+    } finally {
+      window.updateByFunction = false;
+    }
+    window.updateChange();
+    window.updateRange();
+    window.eventBar.update(true);
+    try {
+      const left = window.getOffsetLeft(
+        nextStart.getInTimezone(cal.dtz.defaultTimezone)
+      );
+      const grid = document.getElementById("freebusy-grid");
+      grid.scrollLeft = Math.max(0, left - grid.clientWidth / 3);
+      document.getElementById("day-header-outer").scrollLeft =
+        grid.scrollLeft;
+    } catch (error) {
+      /* The native range update already makes the selected day visible. */
+    }
+  };
+
+  async function onFindTime() {
+    const picker = window.dateTimePickerUI;
+    if (
+      !picker?.startValue ||
+      !picker?.endValue ||
+      picker.allDay.checked ||
+      window.readOnly
+    ) {
+      findTimeStatus.textContent =
+        "Find time is available for editable, timed events.";
+      return;
+    }
+    const attendeeIds = getAttendeeIds();
+    if (!attendeeIds.length) {
+      findTimeStatus.textContent = "Add at least one attendee first.";
+      return;
+    }
+
+    const generation = ++findTimeGeneration;
+    findTimeButton.disabled = true;
+    findTimeButton.setAttribute("aria-busy", "true");
+    findTimeStatus.textContent = "Checking availability…";
+    try {
+      const originalStart = picker.startValue;
+      const duration = picker.endValue.subtractDate(originalStart);
+      if (duration.inSeconds <= 0) {
+        findTimeStatus.textContent = "Choose a valid event duration first.";
+        return;
+      }
+      const workStartHour = Services.prefs.getIntPref(
+        "calendar.view.daystarthour",
+        8
+      );
+      const workEndHour = Services.prefs.getIntPref(
+        "calendar.view.dayendhour",
+        17
+      );
+      if (
+        workStartHour < 0 ||
+        workEndHour > 24 ||
+        workEndHour <= workStartHour ||
+        duration.inSeconds > (workEndHour - workStartHour) * 60 * 60
+      ) {
+        findTimeStatus.textContent =
+          "The event does not fit inside the configured work day.";
+        return;
+      }
+
+      let searchStart = originalStart.getInTimezone(
+        cal.dtz.defaultTimezone
+      );
+      const now = cal.dtz.now().getInTimezone(cal.dtz.defaultTimezone);
+      if (searchStart.compare(now) < 0) {
+        searchStart = now;
+      }
+      searchStart = roundUpToQuarterHour(searchStart);
+
+      const queryStart = searchStart.clone();
+      queryStart.hour = workStartHour;
+      queryStart.minute = 0;
+      queryStart.second = 0;
+      const queryEnd = queryStart.clone();
+      queryEnd.day += 30;
+      const attendeeResults = await Promise.all(
+        attendeeIds.map(id =>
+          getBusyIntervals(id, queryStart, queryEnd, generation)
+        )
+      );
+      if (generation !== findTimeGeneration) {
+        return;
+      }
+      if (attendeeResults.some(result => !result.complete)) {
+        findTimeStatus.textContent =
+          "Availability could not be confirmed for every attendee.";
+        return;
+      }
+      const blockedIntervals = attendeeResults.flatMap(
+        result => result.intervals
+      );
+
+      let found = null;
+      const searchDate = queryStart.clone();
+      for (let dayOffset = 0; dayOffset < 30 && !found; dayOffset++) {
+        if (dayOffset) {
+          searchDate.day++;
+        }
+        if (!isWorkingDay(searchDate)) {
+          continue;
+        }
+        const workStart = searchDate.clone();
+        workStart.hour = workStartHour;
+        workStart.minute = 0;
+        workStart.second = 0;
+        const workEnd = searchDate.clone();
+        workEnd.hour = workEndHour;
+        workEnd.minute = 0;
+        workEnd.second = 0;
+        let candidate =
+          dayOffset === 0 && searchStart.compare(workStart) > 0
+            ? searchStart.clone()
+            : workStart;
+        if (candidate.compare(workEnd) >= 0) {
+          continue;
+        }
+        while (candidate.compare(workEnd) < 0) {
+          const candidateEnd = candidate.clone();
+          candidateEnd.addDuration(duration);
+          if (candidateEnd.compare(workEnd) > 0) {
+            break;
+          }
+          if (!overlaps(candidate, candidateEnd, blockedIntervals)) {
+            found = candidate;
+            break;
+          }
+          candidate = candidate.clone();
+          candidate.minute += 15;
+        }
+      }
+
+      if (!found) {
+        findTimeStatus.textContent =
+          "No common work-time slot was found in the next 30 days.";
+        return;
+      }
+      applyFoundTime(found, duration);
+      findTimeStatus.textContent = `Selected ${cal.dtz.formatter.formatDateShort(
+        found
+      )} at ${cal.dtz.formatter.formatTime(found)}.`;
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not find a meeting time:",
+        error
+      );
+      findTimeStatus.textContent = "A meeting time could not be selected.";
+    } finally {
+      if (generation === findTimeGeneration) {
+        findTimeButton.removeAttribute("aria-busy");
+        syncFindTimeButton();
+      }
+    }
+  }
+
+  function syncFindTimeButton() {
+    findTimeButton.disabled = Boolean(
+      window.readOnly ||
+        window.dateTimePickerUI?.allDay?.checked ||
+        findTimeButton.hasAttribute("aria-busy")
+    );
+  }
+
+  allDayToggle = document.getElementById("all-day");
+  allDayToggle?.addEventListener("command", syncFindTimeButton);
+  findTimeButton.addEventListener("click", onFindTime);
+  syncFindTimeButton();
 
 }
 
@@ -5429,6 +8138,13 @@ function enhanceEventEditorSurface(window, cleanups) {
   let itemFrame = null;
   let removeEditorTracking = null;
   let removeInlineGuests = null;
+  let unifiedViewer = null;
+  let viewerFrame = null;
+  let viewerFrameWasHidden = false;
+  let viewerToolbox = null;
+  let viewerToolboxWasHidden = false;
+  let viewerTimer = 0;
+  let nativeEditorRequested = false;
   const geometry = installRememberedEventWindowGeometry(window, cleanups);
 
   const scheduleWindowGeometry = () => {
@@ -5454,6 +8170,67 @@ function enhanceEventEditorSurface(window, cleanups) {
       ? enhanceInlineGuestsEditor(itemFrame)
       : null;
   };
+  const revealNativeEditor = () => {
+    if (viewerTimer) {
+      window.clearTimeout(viewerTimer);
+      viewerTimer = 0;
+    }
+    unifiedViewer?.remove();
+    unifiedViewer = null;
+    if (viewerFrame) {
+      viewerFrame.toggleAttribute("hidden", viewerFrameWasHidden);
+    }
+    if (viewerToolbox) {
+      viewerToolbox.toggleAttribute("hidden", viewerToolboxWasHidden);
+    }
+    viewerFrame = null;
+    viewerToolbox = null;
+    scheduleWindowGeometry();
+  };
+  const showUnifiedViewer = () => {
+    viewerTimer = 0;
+    if (
+      unifiedViewer ||
+      nativeEditorRequested ||
+      !itemFrame?.isConnected ||
+      window.closed
+    ) {
+      return;
+    }
+    const frameWindow = itemFrame.contentWindow;
+    const item = frameWindow?.calendarItem;
+    /* New Calendar/Tasks items must open directly in their native editable
+     * form. Existing items use the common read-only card until Edit is chosen. */
+    if (!item || frameWindow.mode !== "modify" || !item.id) {
+      return;
+    }
+    const requestKey = getNativeEditorRequestKey(item);
+    if (nativeEditorRequestKeys.delete(requestKey)) {
+      nativeEditorRequested = true;
+      return;
+    }
+    viewerFrame = itemFrame;
+    viewerFrameWasHidden = itemFrame.hasAttribute("hidden");
+    viewerToolbox = document.getElementById("event-toolbox");
+    viewerToolboxWasHidden = viewerToolbox?.hasAttribute("hidden") || false;
+    unifiedViewer = createUnifiedItemView(document, item, {
+      onEdit: revealNativeEditor,
+    });
+    unifiedViewer.id = "outlook-style-editor-item-view";
+    unifiedViewer.style.flex = "1 1 auto";
+    unifiedViewer.style.maxBlockSize = "none";
+    unifiedViewer.style.overflow = "auto";
+    itemFrame.before(unifiedViewer);
+    itemFrame.setAttribute("hidden", "hidden");
+    viewerToolbox?.setAttribute("hidden", "hidden");
+    scheduleWindowGeometry();
+  };
+  const scheduleUnifiedViewer = () => {
+    if (viewerTimer || unifiedViewer || !itemFrame?.isConnected) {
+      return;
+    }
+    viewerTimer = window.setTimeout(showUnifiedViewer, 100);
+  };
   const onItemFrameLoad = event => {
     if (
       event.target === itemFrame ||
@@ -5462,6 +8239,7 @@ function enhanceEventEditorSurface(window, cleanups) {
     ) {
       bindDescriptionEditor();
       bindInlineGuests();
+      scheduleUnifiedViewer();
       scheduleWindowGeometry();
     }
   };
@@ -5474,12 +8252,14 @@ function enhanceEventEditorSurface(window, cleanups) {
     removeEditorTracking = null;
     removeInlineGuests?.();
     removeInlineGuests = null;
+    revealNativeEditor();
     itemFrame?.removeEventListener("load", onItemFrameLoad, true);
     itemFrame = nextFrame;
     if (itemFrame) {
       itemFrame.addEventListener("load", onItemFrameLoad, true);
       bindDescriptionEditor();
       bindInlineGuests();
+      scheduleUnifiedViewer();
       if (
         itemFrame.contentDocument?.documentURI ===
           "chrome://calendar/content/calendar-item-iframe.xhtml" &&
@@ -5493,6 +8273,7 @@ function enhanceEventEditorSurface(window, cleanups) {
   const observer = new window.MutationObserver(bindItemFrame);
   cleanups.push(() => {
     observer.disconnect();
+    revealNativeEditor();
     try {
       removeInlineGuests?.();
     } catch (error) {
@@ -5530,6 +8311,7 @@ function enhanceEventSummarySurface(window, cleanups) {
   const geometry = installRememberedEventWindowGeometry(window, cleanups, {
     rememberUserResize: false,
   });
+  installEventSummaryAvailabilitySurface(window, cleanups);
   const dialog = document.querySelector("dialog");
   const statusNotifications = document.getElementById(
     "status-notifications"

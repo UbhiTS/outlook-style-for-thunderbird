@@ -36,10 +36,10 @@ function Get-BuildHashes {
   return $hashes
 }
 
-& (Join-Path $PSScriptRoot "build.ps1") -Version $Version | Out-Host
+& (Join-Path $PSScriptRoot "build.ps1") -Version $Version -SkipPublish | Out-Host
 $firstHashes = Get-BuildHashes
 
-& (Join-Path $PSScriptRoot "build.ps1") -Version $Version | Out-Host
+& (Join-Path $PSScriptRoot "build.ps1") -Version $Version -SkipPublish | Out-Host
 $secondHashes = Get-BuildHashes
 
 foreach ($artifactName in $artifactNames) {

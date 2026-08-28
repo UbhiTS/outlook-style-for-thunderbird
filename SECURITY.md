@@ -3,9 +3,9 @@
 ## Supported versions
 
 Security fixes are provided for the latest published release only. The theme
-and Companion are deliberately constrained to Thunderbird 153.x because the
-Companion uses privileged Thunderbird interfaces that can change between major
-versions.
+and Companion currently support Thunderbird 153 and 154. Both use privileged
+experiment interfaces that can change between major versions, so ATN requires a
+maximum version and compatibility is advanced only after regression testing.
 
 ## Reporting a vulnerability
 

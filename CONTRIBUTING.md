@@ -35,7 +35,7 @@ wherever possible.
 
 ## Compatibility
 
-Internal Thunderbird selectors and APIs can change without notice. Do not widen
-`strict_max_version` based on syntax checks alone; test clean install, upgrade,
-startup, shutdown, disable/enable, and affected workflows on the new major
-version first.
+Internal Thunderbird selectors and APIs can change without notice. ATN requires
+Experiment add-ons to declare `strict_max_version`, so test clean install,
+upgrade, startup, shutdown, disable/enable, and affected workflows before
+advancing that limit for each new Thunderbird major version.

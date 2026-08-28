@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-  [string]$Version
+  [string]$Version,
+  [string]$PublishDirectory = "\\ubhinas\Shared\thunderbird",
+  [switch]$SkipPublish
 )
 
 $ErrorActionPreference = "Stop"
@@ -265,6 +267,62 @@ function Write-ChecksumFile {
   )
 }
 
+function Publish-BuildArtifacts {
+  param(
+    [Parameter(Mandatory)] [string[]]$ArtifactPaths,
+    [Parameter(Mandatory)] [string]$ChecksumPath,
+    [Parameter(Mandatory)] [string]$DestinationDirectory
+  )
+
+  if (-not (Test-Path -LiteralPath $DestinationDirectory -PathType Container)) {
+    throw "Build publish directory is unavailable: $DestinationDirectory"
+  }
+
+  $temporaryFiles = [System.Collections.Generic.List[string]]::new()
+  $sources = @($ArtifactPaths) + @($ChecksumPath)
+  $remoteFiles = [System.Collections.Generic.List[object]]::new()
+  try {
+    foreach ($sourcePath in $sources) {
+      $name = Split-Path -Leaf $sourcePath
+      $destinationPath = Join-Path $DestinationDirectory $name
+      $temporaryPath = Join-Path `
+        $DestinationDirectory `
+        (".{0}.publishing-{1}-{2}" -f $name, $PID, [System.Guid]::NewGuid().ToString("N"))
+      Copy-Item -LiteralPath $sourcePath -Destination $temporaryPath -ErrorAction Stop
+      $temporaryFiles.Add($temporaryPath)
+      if (
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash -ne
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $temporaryPath).Hash
+      ) {
+        throw "Published artifact hash does not match its local build: $name"
+      }
+      $remoteFiles.Add([pscustomobject]@{
+        Destination = $destinationPath
+        Source = $sourcePath
+        Temporary = $temporaryPath
+      })
+    }
+
+    # Publish the checksum last. It is the remote commit marker for a complete
+    # set of versioned XPI and ZIP artifacts.
+    foreach ($remoteFile in $remoteFiles | Where-Object {
+      $_.Source -ne $ChecksumPath
+    }) {
+      Move-Item -LiteralPath $remoteFile.Temporary -Destination $remoteFile.Destination -Force
+      $temporaryFiles.Remove($remoteFile.Temporary) | Out-Null
+    }
+    $remoteChecksum = $remoteFiles | Where-Object { $_.Source -eq $ChecksumPath } | Select-Object -First 1
+    Move-Item -LiteralPath $remoteChecksum.Temporary -Destination $remoteChecksum.Destination -Force
+    $temporaryFiles.Remove($remoteChecksum.Temporary) | Out-Null
+  } finally {
+    foreach ($temporaryPath in $temporaryFiles) {
+      if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+        Remove-Item -LiteralPath $temporaryPath -Force
+      }
+    }
+  }
+}
+
 $packages = @(
   @{
     Name = "outlook-style-for-thunderbird-$Version"
@@ -313,6 +371,15 @@ try {
 $publishedArtifacts = foreach ($package in $packages) {
   Join-Path $distDir "$($package.Name).xpi"
   Join-Path $distDir "$($package.Name).zip"
+}
+$publishedChecksum = Join-Path $distDir "SHA256SUMS.txt"
+
+if (-not $SkipPublish) {
+  Publish-BuildArtifacts `
+    -ArtifactPaths $publishedArtifacts `
+    -ChecksumPath $publishedChecksum `
+    -DestinationDirectory $PublishDirectory
+  Write-Output "Copied version $Version build artifacts to $PublishDirectory."
 }
 
 Get-FileHash -Algorithm SHA256 -LiteralPath $publishedArtifacts |
