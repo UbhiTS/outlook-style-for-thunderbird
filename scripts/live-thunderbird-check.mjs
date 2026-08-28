@@ -578,6 +578,140 @@ try {
       }
       return { closed: windows.length };
     `);
+  } else if (action === "exercise-unread-thread-defaults") {
+    result = await execute(`
+      return (async () => {
+        const { MailServices } = ChromeUtils.importESModule(
+          "resource:///modules/MailServices.sys.mjs"
+        );
+        if (!MailServices.accounts.localFoldersServer) {
+          MailServices.accounts.createLocalMailAccount();
+        }
+        const root = MailServices.accounts.localFoldersServer.rootFolder;
+        const folderName = "Unread Thread Defaults " + Date.now();
+        root.createSubfolder(folderName, null);
+        const folder = root.getChildNamed(folderName);
+        const localFolder = folder.QueryInterface(Ci.nsIMsgLocalMailFolder);
+        const message = ({ id, inReplyTo = "", read, subject }) => [
+          "From: Test Sender <sender@example.invalid>",
+          "To: Test Recipient <recipient@example.invalid>",
+          "Date: Thu, 27 Aug 2026 12:00:00 -0700",
+          "Message-ID: <" + id + ">",
+          ...(inReplyTo
+            ? [
+                "In-Reply-To: <" + inReplyTo + ">",
+                "References: <" + inReplyTo + ">",
+              ]
+            : []),
+          "Subject: " + subject,
+          "X-Mozilla-Status: " + (read ? "0001" : "0000"),
+          "X-Mozilla-Status2: 00000000",
+          "Content-Type: text/plain; charset=UTF-8",
+          "",
+          "Thread default regression fixture.",
+          "",
+        ].join("\\r\\n");
+
+        localFolder.addMessage(message({
+          id: "read-root@example.invalid",
+          read: true,
+          subject: "Fully read thread",
+        }));
+        localFolder.addMessage(message({
+          id: "read-reply@example.invalid",
+          inReplyTo: "read-root@example.invalid",
+          read: true,
+          subject: "Re: Fully read thread",
+        }));
+        localFolder.addMessage(message({
+          id: "unread-root@example.invalid",
+          read: true,
+          subject: "Thread with unread reply",
+        }));
+        localFolder.addMessage(message({
+          id: "unread-reply@example.invalid",
+          inReplyTo: "unread-root@example.invalid",
+          read: false,
+          subject: "Re: Thread with unread reply",
+        }));
+
+        Services.prefs.setIntPref(
+          "mailnews.default_view_flags",
+          Ci.nsMsgViewFlagsType.kThreadedDisplay
+        );
+        const host = Services.wm.getMostRecentWindow("mail:3pane");
+        const tabmail = host.document.getElementById("tabmail");
+        let pane = tabmail.currentAbout3Pane;
+        if (!pane) {
+          tabmail.openTab("mail3PaneTab", { folderURI: folder.URI });
+          const paneDeadline = Date.now() + 10000;
+          while (
+            (!pane ||
+              pane.location.href !== "about:3pane" ||
+              typeof pane.displayFolder !== "function") &&
+            Date.now() < paneDeadline
+          ) {
+            await new Promise(resolve => host.setTimeout(resolve, 50));
+            pane = tabmail.currentAbout3Pane;
+          }
+        }
+        if (!pane || typeof pane.displayFolder !== "function") {
+          throw new Error("Timed out opening the mail three-pane");
+        }
+        const loaded = new Promise((resolve, reject) => {
+          const timeout = pane.setTimeout(
+            () => reject(new Error("Timed out loading thread fixture")),
+            10000
+          );
+          pane.addEventListener(
+            "allMessagesLoaded",
+            () => {
+              pane.clearTimeout(timeout);
+              pane.setTimeout(resolve, 100);
+            },
+            { once: true }
+          );
+        });
+        pane.displayFolder(folder.URI);
+        await loaded;
+
+        const rows = [];
+        for (let index = 0; index < pane.gDBView.rowCount; index++) {
+          if (
+            pane.gDBView.getLevel(index) !== 0 ||
+            !pane.gDBView.isContainer(index)
+          ) {
+            continue;
+          }
+          const thread = pane.gDBView.getThreadContainingIndex(index);
+          let unread = 0;
+          for (let child = 0; child < thread.numChildren; child++) {
+            if (!(thread.getChildHdrAt(child).flags & Ci.nsMsgMessageFlags.Read)) {
+              unread++;
+            }
+          }
+          rows.push({
+            open: pane.gDBView.isContainerOpen(index),
+            subject: thread.getRootHdr().mime2DecodedSubject,
+            unread,
+          });
+        }
+        const readThread = rows.find(row => row.subject === "Fully read thread");
+        const unreadThread = rows.find(
+          row => row.subject === "Thread with unread reply"
+        );
+        return {
+          folder: folder.URI,
+          passed: Boolean(
+            readThread &&
+            !readThread.open &&
+            unreadThread &&
+            unreadThread.open
+          ),
+          rows,
+        };
+      })();
+    `);
   } else if (action === "screenshot") {
     const outputPath = process.argv[3];
     if (!outputPath) {

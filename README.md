@@ -1,6 +1,6 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.54**.
+Current package version: **1.0.55**.
 
 An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153–154**
 (minimum 153.0). It follows the operating system's light or dark appearance
@@ -34,8 +34,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.54.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.54.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.55.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.55.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -166,6 +166,20 @@ duration, honors Thunderbird's configured work hours and days, and selects the
 first slot within 30 days where every returned participant interval is free or
 tentative. A warning remains because a blank row is ambiguous rather than proof
 that a provider returned availability data.
+
+## Version 1.0.55 unread threads and event-description actions
+
+- Expands a thread when its newly loaded view contains at least one unread
+  message, including an unread reply beneath a read parent.
+- Keeps fully read threads collapsed by default while preserving manual thread
+  toggles after the view loads.
+- Restores the exact selected message after applying the default, revealing a
+  read thread only when needed to keep its selected reply visible.
+- Makes ordinary web links and internal `go/...` shortcuts clickable in the
+  shared invitation, event-summary, and existing-event description viewer.
+- Opens description email links in a Thunderbird compose window and adds
+  Outlook-style right-click actions for email addresses, links, selected text,
+  and selecting the full description.
 
 ## Version 1.0.54 visible attendee zoom controls
 

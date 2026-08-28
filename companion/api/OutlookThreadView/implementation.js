@@ -91,7 +91,9 @@ const guardedConversationViews = new Set();
 const conversationGuardState = new WeakMap();
 const conversationSelectionCapturePanes = new Set();
 const conversationSelectionCaptureState = new WeakMap();
+const unreadThreadDefaultsAppliedViews = new WeakSet();
 const nativeEditorRequestKeys = new Set();
+const unifiedItemDescriptionMenuState = new WeakMap();
 
 const OUTLOOK_COLOR_SCHEME_ATTRIBUTE = "data-outlook-color-scheme";
 
@@ -1182,6 +1184,75 @@ function retireConversationView(messagePane, conversationView) {
   conversationView.remove();
 }
 
+function threadContainsUnreadMessage(thread) {
+  try {
+    for (let index = 0; index < thread.numChildren; index++) {
+      const message = thread.getChildHdrAt(index);
+      if (!(message.flags & Ci.nsMsgMessageFlags.Read)) {
+        return true;
+      }
+    }
+  } catch (error) {
+    /* A live view can replace a thread while its folder is refreshing. */
+  }
+  return false;
+}
+
+/**
+ * Establish the Outlook-style default for a newly loaded threaded view.
+ * Read threads begin collapsed and threads containing any unread message begin
+ * expanded. The view is handled only once so later manual toggles remain under
+ * the user's control. Restoring the selection may reveal a selected read reply.
+ */
+function applyUnreadThreadDefaults(about3Pane) {
+  const dbView = about3Pane?.gDBView;
+  const viewWrapper = about3Pane?.gViewWrapper;
+  const threadPane = about3Pane?.threadPane;
+  const threadTree = about3Pane?.threadTree;
+  if (
+    about3Pane?.closed ||
+    !dbView ||
+    !viewWrapper?.showThreaded ||
+    viewWrapper.showGroupedBySort ||
+    !threadPane ||
+    !threadTree ||
+    about3Pane.dbViewWrapperListener?.allMessagesLoaded !== true ||
+    unreadThreadDefaultsAppliedViews.has(dbView)
+  ) {
+    return false;
+  }
+
+  /* Capture message URIs before collapsing so Thunderbird can restore the
+   * exact selected reply after the visible row indices change. */
+  threadPane.saveSelection();
+  dbView.doCommand(Ci.nsMsgViewCommandType.collapseAll);
+  viewWrapper._threadExpandAll = false;
+
+  /* Expanding from the bottom keeps every not-yet-visited root index stable as
+   * child rows are inserted beneath later roots. */
+  const unreadThreadRootIndices = [];
+  for (let index = dbView.rowCount - 1; index >= 0; index--) {
+    if (
+      dbView.getFlagsAt(index) & MSG_VIEW_FLAG_DUMMY ||
+      !dbView.isContainer(index) ||
+      dbView.isContainerOpen(index)
+    ) {
+      continue;
+    }
+    const thread = dbView.getThreadContainingIndex(index);
+    if (thread?.numChildren > 1 && threadContainsUnreadMessage(thread)) {
+      unreadThreadRootIndices.push(index);
+    }
+  }
+  for (const index of unreadThreadRootIndices) {
+    threadTree.expandRowAtIndex(index);
+  }
+
+  threadPane.restoreSelection();
+  unreadThreadDefaultsAppliedViews.add(dbView);
+  return true;
+}
+
 function removeConversationSelectionCapture(about3Pane) {
   const state = conversationSelectionCaptureState.get(about3Pane);
   if (!state) {
@@ -1192,6 +1263,10 @@ function removeConversationSelectionCapture(about3Pane) {
     "dblclick",
     state.onDoubleClick,
     true
+  );
+  about3Pane.removeEventListener(
+    "allMessagesLoaded",
+    state.onAllMessagesLoaded
   );
   about3Pane.removeEventListener("unload", state.onUnload);
   if (state.refreshTimer) {
@@ -1419,14 +1494,28 @@ function installConversationSelectionCapture(about3Pane, refreshConversation) {
      * fail before reaching the extension. */
     scheduleRefresh();
   };
+  const onAllMessagesLoaded = () => {
+    try {
+      if (applyUnreadThreadDefaults(about3Pane)) {
+        scheduleRefresh();
+      }
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not apply unread thread defaults:",
+        error
+      );
+    }
+  };
   const onUnload = () => {
     retireConversationGuardsForPane(about3Pane);
     removeConversationSelectionCapture(about3Pane);
   };
   threadTree.addEventListener("select", onSelect, true);
   threadTree.addEventListener("dblclick", onDoubleClick, true);
+  about3Pane.addEventListener("allMessagesLoaded", onAllMessagesLoaded);
   about3Pane.addEventListener("unload", onUnload, { once: true });
   state = {
+    onAllMessagesLoaded,
     onDoubleClick,
     onSelect,
     onUnload,
@@ -1438,6 +1527,7 @@ function installConversationSelectionCapture(about3Pane, refreshConversation) {
   };
   conversationSelectionCaptureState.set(about3Pane, state);
   conversationSelectionCapturePanes.add(about3Pane);
+  onAllMessagesLoaded();
   return true;
 }
 
@@ -3129,6 +3219,218 @@ function linkifyGoShortcuts(document, fragment) {
   }
 }
 
+function isEmailLink(href) {
+  return /^mailto:/i.test(href);
+}
+
+function getEmailAddressFromLink(href) {
+  const addressStart = "mailto:".length;
+  const queryStart = href.indexOf("?");
+  let address = href.slice(
+    addressStart,
+    queryStart > addressStart ? queryStart : undefined
+  );
+  try {
+    address = Services.textToSubURI.unEscapeURIForUI(address);
+  } catch (error) {
+    /* Keep the encoded address if it cannot be decoded for display. */
+  }
+  return address;
+}
+
+function openUnifiedItemLink(href, event) {
+  if (isEmailLink(href)) {
+    MailServices.compose.OpenComposeWindowWithURI(
+      null,
+      Services.io.newURI(href),
+      null,
+      event.shiftKey
+        ? Ci.nsIMsgCompFormat.OppositeOfDefault
+        : Ci.nsIMsgCompFormat.Default
+    );
+    return;
+  }
+  openLinkExternally(href, { addToHistory: false });
+}
+
+function copyUnifiedItemText(value) {
+  if (!value) {
+    return;
+  }
+  Cc["@mozilla.org/widget/clipboardhelper;1"]
+    .getService(Ci.nsIClipboardHelper)
+    .copyString(value);
+}
+
+function getUnifiedItemCommandHost(document) {
+  try {
+    const opener = document.defaultView?.opener?.top;
+    if (opener && !opener.closed) {
+      return opener;
+    }
+  } catch (error) {
+    /* A closing or remote opener may no longer be accessible. */
+  }
+  return (
+    Services.wm.getMostRecentWindow("mail:3pane") ||
+    Services.wm.getMostRecentWindow("mail:messageWindow")
+  );
+}
+
+function getUnifiedItemDescriptionMenu(document) {
+  const current = unifiedItemDescriptionMenuState.get(document);
+  if (current?.popup.isConnected) {
+    return current;
+  }
+  if (!document.createXULElement || !document.body) {
+    return null;
+  }
+
+  const popup = document.createXULElement("menupopup");
+  popup.id = "outlook-style-item-description-context";
+  const createItem = (id, label) => {
+    const item = document.createXULElement("menuitem");
+    item.id = `outlook-style-item-description-${id}`;
+    item.setAttribute("label", label);
+    return item;
+  };
+  const open = createItem("open", "Open Link In Browser");
+  const addAddress = createItem("add-address", "Add to Address Book…");
+  const compose = createItem("compose", "Compose Message To");
+  const copyTarget = createItem("copy-target", "Copy Link Location");
+  const save = createItem("save", "Save Link As…");
+  const targetSeparator = document.createXULElement("menuseparator");
+  const copySelection = createItem("copy", "Copy");
+  const selectAll = createItem("select-all", "Select All");
+  popup.append(
+    open,
+    addAddress,
+    compose,
+    copyTarget,
+    save,
+    targetSeparator,
+    copySelection,
+    selectAll
+  );
+  document.body.appendChild(popup);
+
+  const state = {
+    addAddress,
+    anchor: null,
+    compose,
+    copySelection,
+    copyTarget,
+    description: null,
+    open,
+    popup,
+    save,
+    selectAll,
+    targetSeparator,
+  };
+  const onCommand = event => {
+    const anchor = state.anchor;
+    const href = anchor?.href || "";
+    try {
+      if (event.target === open && href) {
+        openUnifiedItemLink(href, event);
+      } else if (event.target === addAddress && href) {
+        getUnifiedItemCommandHost(document)?.toAddressBook?.([
+          "cmd_newCard",
+          getEmailAddressFromLink(href),
+        ]);
+      } else if (event.target === compose && href) {
+        openUnifiedItemLink(href, event);
+      } else if (event.target === copyTarget && href) {
+        copyUnifiedItemText(
+          isEmailLink(href) ? getEmailAddressFromLink(href) : href
+        );
+      } else if (event.target === save && href) {
+        getUnifiedItemCommandHost(document)?.saveURL?.(
+          href,
+          null,
+          anchor.textContent,
+          null,
+          true,
+          false,
+          null,
+          null,
+          document,
+          null,
+          Services.scriptSecurityManager.getSystemPrincipal()
+        );
+      } else if (event.target === copySelection) {
+        copyUnifiedItemText(document.defaultView?.getSelection?.().toString());
+      } else if (event.target === selectAll && state.description) {
+        const selection = document.defaultView?.getSelection?.();
+        const range = document.createRange();
+        range.selectNodeContents(state.description);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    } catch (error) {
+      console.error(
+        "Outlook Style Companion could not run a calendar description command:",
+        error
+      );
+    }
+  };
+  const onPopupHidden = () => {
+    state.anchor = null;
+    state.description = null;
+  };
+  const cleanup = () => {
+    popup.removeEventListener("command", onCommand);
+    popup.removeEventListener("popuphidden", onPopupHidden);
+    popup.remove();
+    unifiedItemDescriptionMenuState.delete(document);
+  };
+  popup.addEventListener("command", onCommand);
+  popup.addEventListener("popuphidden", onPopupHidden);
+  document.defaultView?.addEventListener("unload", cleanup, { once: true });
+  unifiedItemDescriptionMenuState.set(document, state);
+  return state;
+}
+
+function openUnifiedItemDescriptionMenu(document, description, event) {
+  const state = getUnifiedItemDescriptionMenu(document);
+  if (!state || !event.isTrusted) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const anchor = event.target?.closest?.("a[href]") || null;
+  const email = Boolean(anchor && isEmailLink(anchor.href));
+  const webLink = Boolean(anchor && !email);
+  const commandHost = getUnifiedItemCommandHost(document);
+  const selectionText = document.defaultView?.getSelection?.().toString() || "";
+  state.anchor = anchor;
+  state.description = description;
+  state.open.hidden = !webLink;
+  state.addAddress.hidden = !email || !commandHost?.toAddressBook;
+  state.compose.hidden = !email;
+  state.copyTarget.hidden = !anchor;
+  state.save.hidden = !webLink || !commandHost?.saveURL;
+  state.targetSeparator.hidden = !anchor;
+  state.copySelection.hidden = !selectionText;
+  state.copyTarget.setAttribute(
+    "label",
+    email ? "Copy Email Address" : "Copy Link Location"
+  );
+  if (event.screenX || event.screenY) {
+    state.popup.openPopupAtScreen(
+      event.screenX,
+      event.screenY,
+      true,
+      event
+    );
+  } else {
+    state.popup.openPopup(anchor, {
+      position: "after_start",
+      triggerEvent: event,
+    });
+  }
+}
+
 function createUnifiedItemDescription(document, item, description) {
   const fragment = cal.view.textToHtmlDocumentFragment(
     description,
@@ -3145,7 +3447,7 @@ function createUnifiedItemDescription(document, item, description) {
         return;
       }
       try {
-        openLinkExternally(anchor.href, { addToHistory: false });
+        openUnifiedItemLink(anchor.href, event);
       } catch (error) {
         console.error(
           "Outlook Style Companion could not open a calendar description link:",
@@ -3225,6 +3527,9 @@ function createUnifiedItemView(document, item, options = {}) {
     content.appendChild(
       createUnifiedItemDescription(document, item, description)
     );
+    content.addEventListener("contextmenu", event => {
+      openUnifiedItemDescriptionMenu(document, content, event);
+    });
     descriptionSection.append(heading, content);
     details.appendChild(descriptionSection);
   }
