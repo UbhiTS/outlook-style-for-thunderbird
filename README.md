@@ -1,6 +1,6 @@
 # Outlook Style for Thunderbird
 
-Current package version: **1.0.52**.
+Current package version: **1.0.53**.
 
 An unofficial adaptive Outlook-style theme for Mozilla Thunderbird **153–154**
 (minimum 153.0). It follows the operating system's light or dark appearance
@@ -34,8 +34,8 @@ Install both files. Existing 1.0.x installations update in place because the int
 2. Open **Menu (≡) → Add-ons and Themes**.
 3. Click the gear button in Add-ons Manager.
 4. Choose **Install Add-on From File…**.
-5. Select `dist/outlook-style-for-thunderbird-1.0.52.xpi` and confirm.
-6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.52.xpi`.
+5. Select `dist/outlook-style-for-thunderbird-1.0.53.xpi` and confirm.
+6. Repeat **Install Add-on From File…** and select `dist/outlook-style-companion-1.0.53.xpi`.
 7. Restart Thunderbird so already-open Settings, Add-ons, mail, and reminder windows reload with the new scheme.
 
 The companion integrates with Thunderbird's native message reader, Today pane, and reminder dialog, so Thunderbird displays an elevated-access warning. It operates locally, contains no telemetry or network requests, and neither extracts nor transmits message or calendar data.
@@ -166,6 +166,17 @@ duration, honors Thunderbird's configured work hours and days, and selects the
 first slot within 30 days where every returned participant interval is free or
 tentative. A warning remains because a blank row is ambiguous rather than proof
 that a provider returned availability data.
+
+## Version 1.0.53 distribution refresh
+
+- Republishes the calendar creation and Scheduling Assistant improvements under
+  a new upgrade version with a complete, independently checksummed artifact set.
+- Keeps the v1.0.52 behavior unchanged: dragged timed ranges open New Event,
+  New Message includes the New Event split menu, and Invite Attendees provides
+  Find time, semantic availability patterns, explicit zoom controls, and aligned
+  event-editor headings.
+- Publishes the same gated artifacts to the repository's standard NAS
+  distribution folder as well as the GitHub Release.
 
 ## Version 1.0.52 calendar creation and scheduling
 
